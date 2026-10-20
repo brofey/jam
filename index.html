@@ -179,13 +179,8 @@ const part = (geo, mat, x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1) => {
 const jam = new THREE.Group();          // корень: позиция на земле, поворот
 scene.add(jam);
 
-const rearPivot = new THREE.Group();    // ось «встать на задние лапы» (через бедра)
-rearPivot.position.set(0, 0.9, -0.5);
-jam.add(rearPivot);
-
-const bob = new THREE.Group();          // тело: подпрыгивание, тряска
-bob.position.set(0, -0.9, 0.5);
-rearPivot.add(bob);
+const bob = new THREE.Group();          // тело: подпрыгивание, тряска, сон
+jam.add(bob);
 
 const torsoGeo = new THREE.CylinderGeometry(0.42, 0.36, 1.6, 7);
 torsoGeo.rotateX(Math.PI / 2);
@@ -471,12 +466,6 @@ function sfxBark() {
   tone('square', 600, 230, 0.12, 0.28, t + 0.2, sfxBus);
   noiseHit(t, 0.08, 0.12, 900, sfxBus, 'bandpass');
 }
-function sfxRear() {
-  if (!actx) return;
-  const t = actx.currentTime;
-  tone('triangle', 220, 660, 0.35, 0.25, t, sfxBus);
-  tone('square', 990, 990, 0.08, 0.1, t + 0.32, sfxBus);
-}
 function sfxPop() {
   if (!actx) return;
   tone('triangle', 330, 880, 0.14, 0.3, actx.currentTime, sfxBus);
@@ -589,7 +578,7 @@ function popup(text, x, y, z) {
 
 // ---------- Игровая логика ----------
 let score = 0, speed = 0, gait = 0, jumpY = 0, jumpV = 0;
-let barkT = 0, shakeT = 0, rearAmt = 0, rearT = 0, idleT = 0;
+let barkT = 0, shakeT = 0, idleT = 0, sleepAmt = 0, sleeping = false;
 let blinkNext = 2.5, blinkDur = 0, spawnT = 0, peeing = null;
 const _dir = new THREE.Vector3();
 let dizzyT = 0, flee = null, fleeCool = 0;   // головокружение, бегство от Леви, пауза после бегства
@@ -598,6 +587,7 @@ function bark() {
   if (jumpY === 0) jumpV = 5.5;
   sfxBark();
   barkT = 0.4;
+  idleT = 0;   // проснулся
   popup(pick(['Гав!', 'Гав-гав!', 'Р-р-гав!']), jam.position.x, jam.position.y + 2.4, jam.position.z);
 }
 
@@ -607,7 +597,6 @@ function startPee(pile) {
   jam.rotation.y = Math.atan2(-dx, -dz);   // встаёт задом к куче
   peeing = { pile, t: 0, done: false };
   startPeeSound();
-  rearT = 0;
 }
 
 function update(dt, t) {
@@ -661,7 +650,7 @@ function update(dt, t) {
   }
   if (peeing || dizzyT > 0) _dir.set(0, 0, 0);
   const moving = _dir.lengthSq() > 0.0001;
-  if (moving) { _dir.normalize(); rearT = 0; }
+  if (moving) _dir.normalize();
 
   speed = lerp(speed, moving ? (flee ? RUN * 1.3 : RUN) : 0, 1 - Math.exp(-8 * dt));
   if (moving) {
@@ -687,7 +676,7 @@ function update(dt, t) {
       if (u.dying || u.target || u.spawnT < 0.6) continue;
       if (Math.hypot(p.position.x - jam.position.x, p.position.z - jam.position.z) < 1.5) {
         if (u.fouled) startDizzy(p);
-        else if (rearAmt < 0.3) startPee(p);
+        else startPee(p);
         break;
       }
     }
@@ -731,27 +720,21 @@ function update(dt, t) {
   }
   jam.position.y = jumpY;
 
-  // 6) Встать на задние лапы, если долго стоит (как на фото)
-  if (moving || peeing) {
-    idleT = 0; rearT = 0;
-  } else {
-    idleT += dt;
-    if (idleT > 4 && rearT <= 0) { rearT = 2.6; idleT = 0; sfxRear(); }
-  }
-  if (rearT > 0) rearT -= dt;
-  const rearTarget = rearT > 0 && !peeing ? 1 : 0;
-  rearAmt = lerp(rearAmt, rearTarget, 1 - Math.exp(-6 * dt));
-  rearPivot.rotation.x = -1.3 * rearAmt;
+  // 6) Если долго не двигается — ложится клубочком и спит
+  const resting = !moving && !peeing && dizzyT <= 0 && !flee;
+  idleT = resting ? idleT + dt : 0;
+  sleeping = idleT > 4;
+  sleepAmt = lerp(sleepAmt, sleeping ? 1 : 0, 1 - Math.exp(-(sleeping ? 2 : 6) * dt));
 
-  // 7) Бег: шаги, подпрыгивание, уши, язык
+  // 7) Бег: шаги, подпрыгивание, уши, язык; во сне лапы подобраны, тело у земли
   const k = clamp(speed / RUN, 0, 1);
   gait += dt * (2 + speed * 1.5);
   const sw = Math.sin(gait) * 0.75 * k;
-  frontL.rotation.x = sw;
-  frontR.rotation.x = -sw;
-  hindL.rotation.x = -sw - rearPivot.rotation.x;   // компенсация, чтобы задние лапы стояли ровно
-  hindR.rotation.x = sw - rearPivot.rotation.x;
-  bob.position.y = -0.9 + Math.abs(Math.sin(gait)) * 0.12 * k;
+  frontL.rotation.x = lerp(sw, -1.35, sleepAmt);
+  frontR.rotation.x = lerp(-sw, -1.35, sleepAmt);
+  hindL.rotation.x = lerp(-sw, 1.35, sleepAmt);
+  hindR.rotation.x = lerp(sw, 1.35, sleepAmt);
+  bob.position.y = lerp(0, -0.6, sleepAmt) + Math.abs(Math.sin(gait)) * 0.12 * k + Math.sin(t * 2) * 0.02 * sleepAmt;
   if (shakeT > 0) {
     shakeT -= dt;
     bob.rotation.z = Math.sin(shakeT * 55) * 0.18 * (shakeT / 0.6);
@@ -761,15 +744,19 @@ function update(dt, t) {
 
   // 8) Голова, уши, хвост, моргание
   if (barkT > 0) barkT -= dt;
-  headPivot.rotation.x = Math.sin(gait * 2) * 0.07 * k + (barkT > 0 ? -0.3 * Math.sin((barkT / 0.4) * Math.PI) : 0);
+  headPivot.rotation.x = Math.sin(gait * 2) * 0.07 * k + (barkT > 0 ? -0.3 * Math.sin((barkT / 0.4) * Math.PI) : 0) + sleepAmt * 0.3;
+  headPivot.position.set(0, lerp(1.25, 1.05, sleepAmt), lerp(0.8, 0.95, sleepAmt));
   earL.rotation.z = -0.6 + Math.sin(gait * 2) * 0.15 * k;
   earR.rotation.z = 0.25 + Math.sin(gait * 2 + 1) * 0.15 * k;
-  tailWag.rotation.y = Math.sin(t * (moving ? 16 : 5)) * (moving ? 0.6 : 0.3);
+  tailWag.rotation.y = Math.sin(t * (moving ? 16 : 5)) * (moving ? 0.6 : 0.3) * (1 - sleepAmt);
+  tailWag.position.y = lerp(1.25, 0.9, sleepAmt);
+  tailTilt.rotation.x = lerp(-0.9, -1.6, sleepAmt);   // во сне хвост лежит на земле
   tongue.visible = k > 0.5;
 
   blinkNext -= dt;
   if (blinkNext < 0) { blinkNext = rand(2, 4.5); blinkDur = 0.12; }
   if (blinkDur > 0) { blinkDur -= dt; eyes.scale.y = 0.12; } else { eyes.scale.y = 1; }
+  if (sleepAmt > 0.5) eyes.scale.y = 0.1;   // спит с закрытыми глазами
 
   // 9) Камера следует за Джемом
   camera.position.x = lerp(camera.position.x, jam.position.x, 1 - Math.exp(-4 * dt));
@@ -943,7 +930,7 @@ leviTailWag.add(leviTail);
 leviTail.add(part(new THREE.CylinderGeometry(0.06, 0.09, 0.8, 5), LEVI_BLACK, 0, 0.4, 0));
 
 // состояния: idle (стоит) → walk (идёт) → poop (какает на кучу) → idle
-const leviAI = { state: 'idle', t: 2, el: 0, pooped: false, tx: 0, tz: 0, pile: null, poopCool: rand(12, 20), speed: 0, gait: 0 };
+const leviAI = { state: 'idle', t: 2, el: 0, pooped: false, tx: 0, tz: 0, pile: null, poopCool: rand(4, 8), speed: 0, gait: 0 };
 
 function turnTo(obj, want, dt, rate) {
   let diff = want - obj.rotation.y;
@@ -956,20 +943,38 @@ function cleanPileCount() {
   return piles.filter((p) => !p.userData.dying && !p.userData.fouled && p !== (peeing && peeing.pile)).length;
 }
 
+// ближайшая подходящая куча — так Леви быстрее доходит и какает чаще
 function pickPoopPile() {
-  const ok = piles.filter((p) => {
-    const u = p.userData;
-    return !u.dying && !u.fouled && !u.target && u.spawnT >= 0.6;
-  });
-  return ok.length ? pick(ok) : null;
+  const at = leviRoot.position;
+  let best = null, bd = Infinity;
+  for (const q of piles) {
+    const u = q.userData;
+    if (u.dying || u.fouled || u.target || u.spawnT < 0.6) continue;
+    const d = Math.hypot(q.position.x - at.x, q.position.z - at.z);
+    if (d < bd) { bd = d; best = q; }
+  }
+  return best;
 }
 
-function leviGoIdle() {
+function leviGoIdle(wait = rand(1.5, 4)) {
   const L = leviAI;
   if (L.pile) L.pile.userData.target = false;
   L.pile = null;
   L.state = 'idle';
-  L.t = rand(1.5, 4);
+  L.t = wait;
+}
+
+// пора какать и чистых куч хватает (не меньше LEVI_CLEAN_MIN после какашки) — берём кучу
+function leviTryPile() {
+  const L = leviAI;
+  if (L.poopCool > 0 || cleanPileCount() <= LEVI_CLEAN_MIN) return false;
+  const pile = pickPoopPile();
+  if (!pile) return false;
+  pile.userData.target = true;
+  L.pile = pile;
+  L.tx = pile.position.x;
+  L.tz = pile.position.z;
+  return true;
 }
 
 function updateLevi(dt, t) {
@@ -979,15 +984,14 @@ function updateLevi(dt, t) {
   if (L.state === 'idle') {
     L.t -= dt;
     if (L.t <= 0) {
-      // Леви не какает, если после этого осталось бы меньше LEVI_CLEAN_MIN чистых куч
-      const pile = L.poopCool <= 0 && cleanPileCount() > LEVI_CLEAN_MIN ? pickPoopPile() : null;
-      if (pile) pile.userData.target = true;
-      L.pile = pile;
-      L.tx = pile ? pile.position.x : rand(-BOUND + 3, BOUND - 3);
-      L.tz = pile ? pile.position.z : rand(-BOUND + 3, BOUND - 3);
+      if (!leviTryPile()) {
+        L.tx = rand(-BOUND + 3, BOUND - 3);
+        L.tz = rand(-BOUND + 3, BOUND - 3);
+      }
       L.state = 'walk';
     }
   } else if (L.state === 'walk') {
+    if (!L.pile) leviTryPile();   // в пути тоже может переключиться на кучу, если пора какать
     if (L.pile && (L.pile.userData.dying || L.pile.userData.fouled)) {
       leviGoIdle();
     } else {
@@ -1013,12 +1017,12 @@ function updateLevi(dt, t) {
       L.pooped = true;
       if (!u.dying && cleanPileCount() > LEVI_CLEAN_MIN) {
         addPoop(pile);
-        L.poopCool = rand(12, 20);
+        L.poopCool = rand(4, 7);
       } else {
-        L.poopCool = rand(5, 8);
+        L.poopCool = rand(2, 4);
       }
     }
-    if (L.el >= 2) leviGoIdle();
+    if (L.el >= 2) leviGoIdle(rand(0.5, 1.5));
   }
   if (L.state !== 'walk') L.speed = lerp(L.speed, 0, 1 - Math.exp(-5 * dt));
 
