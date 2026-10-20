@@ -592,14 +592,15 @@ function bark() {
   idleT = 0;   // проснулся
   popup(pick(['Гав!', 'Гав-гав!', 'Р-р-гав!']), jam.position.x, jam.position.y + 2.4, jam.position.z);
 
-  // три гава подряд (не дольше 2.5 секунды) — Кай и Леви убегают от Джема
+  // три гава подряд (не дольше 2.5 секунды) — убегают только Кай и Леви в радиусе слышимости
   barkTimes = barkTimes.filter((bt) => time - bt < 2.5);
   barkTimes.push(time);
   if (barkTimes.length >= 3) {
     barkTimes = [];
-    kaiRunAway();
-    leviRunAway();
-    popup('Пошли вон!', jam.position.x, jam.position.y + 2.8, jam.position.z);
+    const kaiHeard = dogNear(kai.position), leviHeard = dogNear(leviRoot.position);
+    if (kaiHeard) kaiRunAway();
+    if (leviHeard) leviRunAway();
+    if (kaiHeard || leviHeard) popup('Пошли вон!', jam.position.x, jam.position.y + 2.8, jam.position.z);
   }
 }
 
@@ -786,6 +787,7 @@ function update(dt, t) {
   updateKai(dt, t);
   updateToys(dt);
   updateAnger(t);
+  updateHackles(dt, t);
   updateLeaves(dt, t);
   updateParticles(dt);
 }
@@ -1346,6 +1348,86 @@ jam.add(angerSprite);
 function updateAnger(t) {
   angerSprite.visible = angryT > 0;
   angerSprite.scale.setScalar(0.8 + Math.sin(t * 10) * 0.08);
+}
+
+// ---------- Радиус слышимости и холка ----------
+const HEAR_R = 5.5;   // на таком расстоянии Джем слышит Кая и Леви
+const HACKLE_N = 5;
+
+function sfxGrowl() {
+  if (!actx) return;
+  const t = actx.currentTime, dur = 0.9;
+  const o = actx.createOscillator();
+  o.type = 'sawtooth';
+  o.frequency.setValueAtTime(130, t);
+  o.frequency.linearRampToValueAtTime(90, t + dur);
+  const wobble = actx.createOscillator();   // дрожь в горле
+  wobble.frequency.value = 22;
+  const wobbleG = actx.createGain();
+  wobbleG.gain.value = 14;
+  wobble.connect(wobbleG);
+  wobbleG.connect(o.frequency);
+  const f = actx.createBiquadFilter();
+  f.type = 'lowpass';
+  f.frequency.value = 600;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.25, t + 0.12);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(f);
+  f.connect(g);
+  g.connect(sfxBus);
+  o.start(t);
+  wobble.start(t);
+  o.stop(t + dur + 0.05);
+  wobble.stop(t + dur + 0.05);
+}
+
+function dogNear(p) {
+  return Math.hypot(p.x - jam.position.x, p.z - jam.position.z) < HEAR_R;
+}
+
+// холка: ряд символов «^» над спиной, они дрожат волной
+const hackleTex = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.font = 'bold 120px sans-serif';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.lineWidth = 16;
+  g.strokeStyle = '#fff3d6';
+  g.strokeText('^', 64, 70);
+  g.fillStyle = '#2b1a0e';
+  g.fillText('^', 64, 70);
+  return new THREE.CanvasTexture(c);
+})();
+const hackles = Array.from({ length: HACKLE_N }, (_, i) => {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: hackleTex, transparent: true, depthTest: false }));
+  s.position.set(0, 1.75, 0.7 - i * 0.34);
+  s.visible = false;
+  jam.add(s);
+  return s;
+});
+let earshot = false, growlT = 0, hackleAmt = 0;
+
+function updateHackles(dt, t) {
+  const near = dogNear(kai.position) || dogNear(leviRoot.position);
+  if (near && !earshot) { sfxGrowl(); growlT = 1.2; }   // услышал — рычит
+  earshot = near;
+  if (earshot) {
+    idleT = 0;                                          // в радиусе не засыпает
+    growlT -= dt;
+    if (growlT <= 0) { sfxGrowl(); growlT = 1.2; }
+  }
+  hackleAmt = lerp(hackleAmt, earshot ? 1 : 0, 1 - Math.exp(-10 * dt));
+  hackles.forEach((s, i) => {
+    const wave = Math.sin(t * 16 + i * 0.9);
+    s.visible = hackleAmt > 0.02;
+    s.scale.setScalar(0.6 * hackleAmt);
+    s.position.y = lerp(1.75, 1.05, sleepAmt) + wave * 0.1 * hackleAmt;
+    s.material.rotation = wave * 0.4;
+  });
 }
 
 // ---------- Старт ----------
