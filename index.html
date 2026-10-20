@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Джем и осенние кучи</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  :root { --chip-bg: rgba(255, 250, 240, 0.92); --ink: #3b2a1a; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --chip-bg: rgba(40, 32, 24, 0.9); --ink: #f5ead8; }
+  }
+  :root[data-theme="dark"] { --chip-bg: rgba(40, 32, 24, 0.9); --ink: #f5ead8; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; background: #bfe4f2; color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    user-select: none; -webkit-user-select: none; touch-action: none;
+  }
+  .chip {
+    background: var(--chip-bg); color: var(--ink); border-radius: 14px;
+    padding: 8px 14px; font-size: 15px; font-weight: 600;
+    box-shadow: 0 4px 0 rgba(0, 0, 0, 0.12); z-index: 2;
+  }
+  #hud { position: fixed; left: 12px; top: calc(12px + env(safe-area-inset-top, 0px)); }
+  #hud b { font-size: 18px; }
+  #autoBtn {
+    position: fixed; right: 12px; top: calc(12px + env(safe-area-inset-top, 0px));
+    border: 0; cursor: pointer; font-family: inherit;
+  }
+  #autoBtn.on { background: #e8772e; color: #fff; }
+  #soundBtn { position: fixed; right: 12px; top: calc(60px + env(safe-area-inset-top, 0px)); border: 0; cursor: pointer; font-family: inherit; }
+  #hint {
+    position: fixed; left: 50%; bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%); max-width: 94vw; text-align: center;
+    font-size: 13px; font-weight: 500; transition: opacity 0.6s;
+  }
+  .pop {
+    position: fixed; z-index: 3; pointer-events: none; white-space: nowrap;
+    font-size: 22px; font-weight: 800; color: #fff;
+    text-shadow: 0 2px 0 #3b2a1a, 0 -2px 0 #3b2a1a, 2px 0 0 #3b2a1a, -2px 0 0 #3b2a1a;
+    animation: pop 1.2s ease-out forwards;
+  }
+  @keyframes pop {
+    0%   { opacity: 0; transform: translate(-50%, -20%) scale(0.5); }
+    15%  { opacity: 1; transform: translate(-50%, -100%) scale(1.15); }
+    100% { opacity: 0; transform: translate(-50%, -190%) scale(1); }
+  }
+</style>
+</head>
+<body>
+<div id="hud" class="chip">🐾 Кучи: <b id="score">0</b></div>
+<button id="autoBtn" class="chip">Авто-бег: выкл</button>
+<button id="soundBtn" class="chip">🔊 Звук: вкл</button>
+<div id="hint" class="chip">WASD или стрелки — бегать · тап или зажатие — бежать туда · Пробел — гав и прыжок</div>
+
+<script>
+// ---------- Утилиты ----------
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const smooth = (a, b, x) => { const k = clamp((x - a) / (b - a), 0, 1); return k * k * (3 - 2 * k); };
+const easeOutBack = (x) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+
+const BOUND = 24, RUN = 6.4, PILE_MAX = 9, G = 9.8;
+const PILE_COLORS = [0xe8772e, 0xd9482b, 0xf2b632, 0xa0522d, 0xc9782f, 0x8b4a1f, 0xe9a23b];
+const PEE_COLOR = new THREE.Color(0xf5d03b);
+const PEE_LINES = ['Пшшш! 💦', 'Моя территория!', 'Ах, полегчало!', 'Ещё одна метка!', 'Сухие листья — мои!', 'Фух, хорошо 😌'];
+
+const scoreEl = document.getElementById('score');
+const autoBtn = document.getElementById('autoBtn');
+const hint = document.getElementById('hint');
+
+// ---------- Рендерер и камера ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xbfe4f2);
+scene.fog = new THREE.Fog(0xbfe4f2, 38, 90);
+
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 200);
+camera.position.set(0, 9, 13);
+camera.lookAt(0, 0.9, 0);
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.fov = camera.aspect < 1 ? 66 : 50;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+resize();
+
+// ---------- Свет ----------
+scene.add(new THREE.HemisphereLight(0xfff8ec, 0x6f9a48, 0.9));
+const sun = new THREE.DirectionalLight(0xffe9c4, 1.1);
+sun.position.set(12, 24, 10);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -36, right: 36, top: 36, bottom: -36, near: 1, far: 90 });
+sun.shadow.camera.updateProjectionMatrix();
+scene.add(sun);
+
+// ---------- Лужайка ----------
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(140, 140),
+  new THREE.MeshStandardMaterial({ color: 0x6fb14c, roughness: 1 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// полосы «покоса»
+const stripeMats = [
+  new THREE.MeshStandardMaterial({ color: 0x84c75c, roughness: 1 }),
+  new THREE.MeshStandardMaterial({ color: 0x78bb52, roughness: 1 })
+];
+for (let i = 0; i < 14; i++) {
+  const s = new THREE.Mesh(new THREE.PlaneGeometry(4, 60), stripeMats[i % 2]);
+  s.rotation.x = -Math.PI / 2;
+  s.position.set(-28 + i * 4 + 2, 0.01, 0);
+  s.receiveShadow = true;
+  scene.add(s);
+}
+
+// деревья и кусты по периметру
+const trunkMat = new THREE.MeshStandardMaterial({ color: 0x7a5230, flatShading: true });
+const crownMats = [0xe8772e, 0xd9482b, 0xf2b632, 0xc9782f, 0x5e9e3f].map(
+  (c) => new THREE.MeshStandardMaterial({ color: c, flatShading: true, roughness: 0.9 })
+);
+function makeTree() {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.45, 2.4, 6), trunkMat);
+  trunk.position.y = 1.2;
+  trunk.castShadow = true;
+  g.add(trunk);
+  for (let i = 0; i < 3; i++) {
+    const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(rand(1.2, 1.7), 0), pick(crownMats));
+    crown.position.set(rand(-0.5, 0.5), 2.7 + i * 0.6, rand(-0.5, 0.5));
+    crown.castShadow = true;
+    g.add(crown);
+  }
+  return g;
+}
+for (let i = 0; i < 18; i++) {
+  const a = (i / 18) * Math.PI * 2 + rand(-0.15, 0.15), r = rand(29, 38);
+  const t = makeTree();
+  t.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+  t.rotation.y = rand(0, 6);
+  scene.add(t);
+}
+const bushMat = new THREE.MeshStandardMaterial({ color: 0x5b9a45, flatShading: true });
+for (let i = 0; i < 30; i++) {
+  const a = rand(0, Math.PI * 2), r = rand(26, 34);
+  const b = new THREE.Mesh(new THREE.IcosahedronGeometry(rand(0.6, 1.1), 0), bushMat);
+  b.position.set(Math.cos(a) * r, 0.4, Math.sin(a) * r);
+  b.castShadow = true;
+  scene.add(b);
+}
+
+// ---------- Джем (собака с фото) ----------
+const matW = new THREE.MeshStandardMaterial({ color: 0xf7f3ea, flatShading: true, roughness: 0.8 });
+const matB = new THREE.MeshStandardMaterial({ color: 0x9a5a2a, flatShading: true, roughness: 0.8 });
+const matD = new THREE.MeshStandardMaterial({ color: 0x2a2118, flatShading: true, roughness: 0.6 });
+const matA = new THREE.MeshStandardMaterial({ color: 0xf0b43c, flatShading: true, roughness: 0.4 });
+const matP = new THREE.MeshStandardMaterial({ color: 0xff8a9a, flatShading: true, roughness: 0.6 });
+const part = (geo, mat, x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1) => {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  m.scale.set(sx, sy, sz);
+  m.castShadow = true;
+  return m;
+};
+
+const jam = new THREE.Group();          // корень: позиция на земле, поворот
+scene.add(jam);
+
+const rearPivot = new THREE.Group();    // ось «встать на задние лапы» (через бедра)
+rearPivot.position.set(0, 0.9, -0.5);
+jam.add(rearPivot);
+
+const bob = new THREE.Group();          // тело: подпрыгивание, тряска
+bob.position.set(0, -0.9, 0.5);
+rearPivot.add(bob);
+
+const torsoGeo = new THREE.CylinderGeometry(0.42, 0.36, 1.6, 7);
+torsoGeo.rotateX(Math.PI / 2);
+bob.add(part(torsoGeo, matW, 0, 1.0, 0));
+
+const headPivot = new THREE.Group();
+headPivot.position.set(0, 1.25, 0.8);
+bob.add(headPivot);
+headPivot.add(part(new THREE.IcosahedronGeometry(0.44, 1), matW, 0, 0, 0.02, 0.92, 0.95, 1.06));
+headPivot.add(part(new THREE.BoxGeometry(0.26, 0.22, 0.48), matW, 0, -0.09, 0.42));
+headPivot.add(part(new THREE.IcosahedronGeometry(0.09, 0), matD, 0, 0.01, 0.7));
+headPivot.add(part(new THREE.DodecahedronGeometry(0.22, 0), matD, 0.2, 0.3, 0.1, 1.15, 0.6, 0.7));   // коричневое пятно на голове
+headPivot.add(part(new THREE.DodecahedronGeometry(0.15, 0), matD, 0.26, 0.14, 0.27, 1, 0.9, 0.6));   // у правого глаза
+
+headPivot.add(part(new THREE.DodecahedronGeometry(0.1, 0), matD, -0.2, 0.25, 0.31, 1.3, 0.5, 0.8)); // тёмная бровь над глазом без пятна
+const eyes = new THREE.Group();          // группа глаз, моргает
+eyes.position.set(0, 0.12, 0);
+headPivot.add(eyes);
+[-0.19, 0.19].forEach((x) => {
+  eyes.add(part(new THREE.SphereGeometry(0.075, 6, 5), matA, x, 0, 0.37));
+  eyes.add(part(new THREE.SphereGeometry(0.035, 5, 4), matD, x, 0, 0.44));
+});
+
+const earL = new THREE.Group();          // белое ушко, висит
+earL.position.set(-0.36, 0.3, -0.02);
+earL.rotation.z = -0.6;
+headPivot.add(earL);
+earL.add(part(new THREE.BoxGeometry(0.12, 0.4, 0.22), matW, 0, -0.2, 0));
+
+const earR = new THREE.Group();          // коричневое ушко, торчит
+earR.position.set(0.34, 0.36, -0.02);
+earR.rotation.z = 0.25;
+headPivot.add(earR);
+earR.add(part(new THREE.BoxGeometry(0.13, 0.42, 0.2), matD, 0, -0.21, 0));
+
+const tongue = part(new THREE.BoxGeometry(0.12, 0.03, 0.16), matP, 0, -0.26, 0.5);
+tongue.visible = false;
+headPivot.add(tongue);
+
+const makeLeg = (x, z) => {
+  const g = new THREE.Group();
+  g.position.set(x, 0.9, z);
+  g.add(part(new THREE.BoxGeometry(0.16, 0.9, 0.16), matW, 0, -0.45, 0));
+  g.add(part(new THREE.BoxGeometry(0.2, 0.12, 0.3), matW, 0, -0.84, 0.05));
+  bob.add(g);
+  return g;
+};
+const frontL = makeLeg(-0.22, 0.5), frontR = makeLeg(0.22, 0.5);
+const hindL = makeLeg(-0.22, -0.5), hindR = makeLeg(0.22, -0.5);
+
+const tailWag = new THREE.Group();       // хвост виляет
+tailWag.position.set(0, 1.25, -0.84);
+bob.add(tailWag);
+const tailTilt = new THREE.Group();
+tailTilt.rotation.x = -0.9;
+tailWag.add(tailTilt);
+tailTilt.add(part(new THREE.CylinderGeometry(0.06, 0.08, 0.7, 5), matW, 0, 0.35, 0));
+tailTilt.add(part(new THREE.ConeGeometry(0.075, 0.2, 5), matW, 0, 0.8, 0));
+
+const peeSpot = new THREE.Object3D();    // откуда льётся
+peeSpot.position.set(0.04, 0.6, -0.86);
+bob.add(peeSpot);
+
+// ---------- Частицы (струя и брызги листьев) ----------
+const MAX_P = 700;
+const pPos = new Float32Array(MAX_P * 3), pCol = new Float32Array(MAX_P * 3);
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
+const points = new THREE.Points(
+  pGeo,
+  new THREE.PointsMaterial({ size: 0.16, vertexColors: true, transparent: true, opacity: 0.95 })
+);
+points.frustumCulled = false;
+scene.add(points);
+
+const parts = Array.from({ length: MAX_P }, () => ({ alive: false, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 0, g: G }));
+let pHead = 0;
+function emit(x, y, z, vx, vy, vz, color, life, g = G) {
+  const i = pHead;
+  pHead = (pHead + 1) % MAX_P;
+  Object.assign(parts[i], { alive: true, x, y, z, vx, vy, vz, life, g });
+  pCol[i * 3] = color.r; pCol[i * 3 + 1] = color.g; pCol[i * 3 + 2] = color.b;
+}
+function updateParticles(dt) {
+  for (let i = 0; i < MAX_P; i++) {
+    const p = parts[i];
+    if (p.alive) {
+      p.life -= dt;
+      p.vy -= p.g * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+      if (p.life <= 0 || p.y < 0.03) p.alive = false;
+    }
+    pPos[i * 3] = p.x;
+    pPos[i * 3 + 1] = p.alive ? p.y : -999;
+    pPos[i * 3 + 2] = p.z;
+  }
+  pGeo.attributes.position.needsUpdate = true;
+  pGeo.attributes.color.needsUpdate = true;
+}
+
+const tmpC = new THREE.Color();
+function burst(x, y, z, count) {
+  for (let i = 0; i < count; i++) {
+    emit(x, y, z, rand(-2.4, 2.4), rand(3, 6), rand(-2.4, 2.4), tmpC.setHex(pick(PILE_COLORS)), rand(0.9, 1.5));
+  }
+}
+
+const _v = new THREE.Vector3();
+function emitStream(pile) {
+  peeSpot.getWorldPosition(_v);
+  for (let n = 0; n < 2; n++) {
+    const T = rand(0.3, 0.45);
+    const tx = pile.position.x + rand(-0.35, 0.35);
+    const tz = pile.position.z + rand(-0.35, 0.35);
+    const vx = (tx - _v.x) / T + rand(-0.3, 0.3);
+    const vz = (tz - _v.z) / T + rand(-0.3, 0.3);
+    const vy = (0.15 - _v.y + 0.5 * G * T * T) / T;
+    emit(_v.x, _v.y, _v.z, vx, vy, vz, PEE_COLOR, 2);
+  }
+}
+
+// ---------- Кучи листвы ----------
+const pileMats = PILE_COLORS.map((c) => new THREE.MeshStandardMaterial({ color: c, flatShading: true, roughness: 0.9 }));
+const piles = [];
+function spawnPile(x, z) {
+  const g = new THREE.Group();
+  const n = 6 + Math.floor(Math.random() * 4);
+  for (let i = 0; i < n; i++) {
+    const r = rand(0.35, 0.65);
+    const geo = Math.random() < 0.5 ? new THREE.IcosahedronGeometry(r, 0) : new THREE.DodecahedronGeometry(r * 0.9, 0);
+    const m = new THREE.Mesh(geo, pick(pileMats));
+    const a = rand(0, Math.PI * 2), d = rand(0, 0.55);
+    m.position.set(Math.cos(a) * d, r * 0.35, Math.sin(a) * d);
+    m.scale.y = 0.6;
+    m.rotation.set(rand(0, 3), rand(0, 3), rand(0, 3));
+    m.castShadow = true;
+    g.add(m);
+  }
+  g.position.set(x, 0, z);
+  g.scale.setScalar(0.001);
+  g.userData = { spawnT: 0, dying: false, dyingT: 0, target: false, phase: rand(0, 6) };
+  scene.add(g);
+  piles.push(g);
+  sfxPop();
+  return g;
+}
+function findSpot() {
+  for (let i = 0; i < 40; i++) {
+    const x = rand(-BOUND + 2, BOUND - 2), z = rand(-BOUND + 2, BOUND - 2);
+    if (Math.hypot(x - jam.position.x, z - jam.position.z) < 5) continue;
+    if (piles.some((p) => Math.hypot(x - p.position.x, z - p.position.z) < 3)) continue;
+    return { x, z };
+  }
+  return null;
+}
+function nearestPile() {
+  let best = null, bd = Infinity;
+  for (const p of piles) {
+    const u = p.userData;
+    if (u.dying || u.target) continue;
+    const d = Math.hypot(p.position.x - jam.position.x, p.position.z - jam.position.z);
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best;
+}
+
+// ---------- Падающая листва (InstancedMesh) ----------
+const LEAF_N = 110;
+const leafGeo = new THREE.OctahedronGeometry(0.28, 0);
+leafGeo.scale(1, 0.14, 0.6);
+const leafMat = new THREE.MeshStandardMaterial({ flatShading: true, roughness: 0.7, side: THREE.DoubleSide });
+const leaves = new THREE.InstancedMesh(leafGeo, leafMat, LEAF_N);
+leaves.frustumCulled = false;
+leaves.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+const leafData = [];
+const dummy = new THREE.Object3D();
+function respawnLeaf(L, anywhere = false) {
+  L.x = rand(-BOUND - 4, BOUND + 4);
+  L.z = rand(-BOUND - 4, BOUND + 4);
+  L.y = anywhere ? rand(0, 18) : rand(15, 19);
+  L.vy = rand(1.0, 1.9);
+  L.phase = rand(0, 6.28);
+  L.spin = rand(1.5, 3.5);
+}
+for (let i = 0; i < LEAF_N; i++) {
+  const L = {};
+  respawnLeaf(L, true);
+  leafData.push(L);
+  leaves.setColorAt(i, tmpC.setHex(pick(PILE_COLORS)));
+}
+scene.add(leaves);
+function updateLeaves(dt, t) {
+  for (let i = 0; i < LEAF_N; i++) {
+    const L = leafData[i];
+    L.y -= L.vy * dt;
+    L.x += Math.sin(t * 1.4 + L.phase) * 0.9 * dt;
+    L.z += Math.cos(t * 0.9 + L.phase) * 0.4 * dt;
+    if (L.y < 0.05) respawnLeaf(L);
+    dummy.position.set(L.x, L.y, L.z);
+    dummy.rotation.set(t * L.spin, L.phase, Math.sin(t * L.spin + L.phase) * 0.6);
+    dummy.updateMatrix();
+    leaves.setMatrixAt(i, dummy.matrix);
+  }
+  leaves.instanceMatrix.needsUpdate = true;
+}
+
+// ---------- Звук: 8-бит эффекты и музыка (WebAudio, без файлов) ----------
+const NOTE = { C3: 130.81, E3: 164.81, F3: 174.61, G3: 196.0, A3: 220.0, G4: 392.0, B4: 493.88, C5: 523.25, D5: 587.33, E5: 659.25, F5: 698.46, G5: 783.99, A5: 880.0 };
+// мелодия (0 — пауза), 32 шестнадцатых = 2 такта
+const LEAD = [NOTE.E5, 0, NOTE.G5, 0, NOTE.A5, NOTE.G5, NOTE.E5, 0, NOTE.D5, 0, NOTE.E5, 0, NOTE.C5, 0, NOTE.G4, 0,
+  NOTE.C5, 0, NOTE.E5, 0, NOTE.G5, NOTE.A5, NOTE.G5, NOTE.E5, NOTE.F5, 0, NOTE.D5, 0, NOTE.B4, 0, NOTE.C5, 0];
+// бас «ум-па-па»
+const BASS = [NOTE.C3, 0, 0, 0, NOTE.G3, 0, 0, 0, NOTE.C3, 0, 0, 0, NOTE.G3, 0, 0, 0,
+  NOTE.A3, 0, 0, 0, NOTE.E3, 0, 0, 0, NOTE.F3, 0, 0, 0, NOTE.G3, 0, 0, 0];
+const STEP = 0.1; // шестнадцатая при 150 bpm
+let actx = null, master = null, sfxBus = null, musicBus = null, noiseBuf = null;
+let muted = false, peeNodes = null, nextNoteTime = 0, musicStep = 0;
+const soundBtn = document.getElementById('soundBtn');
+
+function tone(type, f0, f1, dur, vol, t, bus) {
+  if (!actx) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(f0, t);
+  if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(bus);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+function noiseHit(t, dur, vol, freq, bus, filterType = 'highpass') {
+  if (!actx) return;
+  const src = actx.createBufferSource(); src.buffer = noiseBuf;
+  const f = actx.createBiquadFilter(); f.type = filterType; f.frequency.value = freq;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(f); f.connect(g); g.connect(bus);
+  src.start(t, Math.random() * 0.8); src.stop(t + dur + 0.05);
+}
+
+function initAudio() {
+  if (actx) { if (actx.state === 'suspended') actx.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  actx = new AC();
+  master = actx.createGain();
+  master.gain.value = muted ? 0 : 0.6;
+  master.connect(actx.destination);
+  sfxBus = actx.createGain(); sfxBus.gain.value = 0.5; sfxBus.connect(master);
+  musicBus = actx.createGain(); musicBus.gain.value = 0.2; musicBus.connect(master);
+  noiseBuf = actx.createBuffer(1, actx.sampleRate, actx.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  nextNoteTime = actx.currentTime + 0.15;
+  setInterval(scheduleMusic, 25);
+}
+
+// музыка: планировщик с упреждением
+function scheduleMusic() {
+  if (!actx) return;
+  while (nextNoteTime < actx.currentTime + 0.12) {
+    playStep(musicStep, nextNoteTime);
+    nextNoteTime += STEP;
+    musicStep = (musicStep + 1) % LEAD.length;
+  }
+}
+function playStep(s, t) {
+  const l = LEAD[s], b = BASS[s];
+  if (l) tone('square', l * 0.97, l * 1.03, STEP * 0.8, 0.14, t, musicBus);   // мелодия «поплывёт» вверх
+  if (b) tone('triangle', b, b, STEP * 1.8, 0.35, t, musicBus);
+  if (s % 2 === 1) noiseHit(t, 0.03, 0.12, 7000, musicBus);                      // хай-хэт
+  if (s === 15 || s === 31) tone('square', 1200, 1800, 0.06, 0.06, t, musicBus); // «боп»
+  if (s === 7 && Math.random() < 0.5) tone('square', 1500, 600, 0.08, 0.06, t, musicBus); // икота
+}
+
+// эффекты
+function sfxBark() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  tone('square', 640, 260, 0.13, 0.3, t, sfxBus);
+  tone('square', 600, 230, 0.12, 0.28, t + 0.2, sfxBus);
+  noiseHit(t, 0.08, 0.12, 900, sfxBus, 'bandpass');
+}
+function sfxRear() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  tone('triangle', 220, 660, 0.35, 0.25, t, sfxBus);
+  tone('square', 990, 990, 0.08, 0.1, t + 0.32, sfxBus);
+}
+function sfxPop() {
+  if (!actx) return;
+  tone('triangle', 330, 880, 0.14, 0.3, actx.currentTime, sfxBus);
+}
+function sfxLeaves() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  noiseHit(t, 0.35, 0.22, 2200, sfxBus, 'bandpass');
+  tone('square', 900, 250, 0.22, 0.12, t, sfxBus);
+}
+function sfxCoin() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  tone('square', 988, 988, 0.08, 0.16, t, sfxBus);
+  tone('square', 1319, 1319, 0.22, 0.16, t + 0.08, sfxBus);
+}
+// непрерывная «пш-ш-ш» с булькающим тоном, пока Джем писает
+function startPeeSound() {
+  if (!actx || peeNodes) return;
+  const t = actx.currentTime;
+  const src = actx.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+  const f = actx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 3800; f.Q.value = 0.9;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.14, t + 0.1);
+  const o = actx.createOscillator(); o.type = 'square'; o.frequency.value = 180;
+  const og = actx.createGain(); og.gain.value = 0.05;
+  const lfo = actx.createOscillator(); lfo.frequency.value = 14;
+  const lfoG = actx.createGain(); lfoG.gain.value = 60;
+  lfo.connect(lfoG); lfoG.connect(o.frequency);
+  src.connect(f); f.connect(g); g.connect(sfxBus);
+  o.connect(og); og.connect(sfxBus);
+  src.start(); o.start(); lfo.start();
+  peeNodes = { src, o, lfo, g, og };
+}
+function stopPeeSound() {
+  if (!peeNodes) return;
+  const n = peeNodes;
+  peeNodes = null;
+  const t = actx.currentTime;
+  n.g.gain.setTargetAtTime(0, t, 0.04);
+  n.og.gain.setTargetAtTime(0, t, 0.04);
+  setTimeout(() => { n.src.stop(); n.o.stop(); n.lfo.stop(); }, 300);
+}
+
+soundBtn.addEventListener('click', () => {
+  initAudio();
+  muted = !muted;
+  soundBtn.textContent = muted ? '🔇 Звук: выкл' : '🔊 Звук: вкл';
+  if (master) master.gain.setTargetAtTime(muted ? 0 : 0.6, actx.currentTime, 0.05);
+});
+document.addEventListener('visibilitychange', () => {
+  if (!actx) return;
+  if (document.hidden) actx.suspend(); else actx.resume();
+});
+
+// ---------- Ввод ----------
+const keys = {};
+let pointerDown = false, pointerTarget = null, autoRun = false;
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+
+function aimAt(e) {
+  ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+  const hit = ray.intersectObject(ground)[0];
+  if (hit) pointerTarget = hit.point.clone();
+}
+renderer.domElement.addEventListener('pointerdown', (e) => { pointerDown = true; aimAt(e); initAudio(); });
+renderer.domElement.addEventListener('pointermove', (e) => { if (pointerDown) aimAt(e); });
+addEventListener('pointerup', () => { pointerDown = false; });
+
+addEventListener('keydown', (e) => {
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+  keys[e.code] = true;
+  hint.style.opacity = '0';
+  initAudio();
+  if (e.code === 'Space' && !e.repeat) bark();
+});
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+autoBtn.addEventListener('click', () => {
+  autoRun = !autoRun;
+  autoBtn.textContent = 'Авто-бег: ' + (autoRun ? 'вкл' : 'выкл');
+  autoBtn.classList.toggle('on', autoRun);
+});
+
+// ---------- Всплывающие надписи ----------
+const _pp = new THREE.Vector3();
+function popup(text, x, y, z) {
+  _pp.set(x, y, z).project(camera);
+  const el = document.createElement('div');
+  el.className = 'pop';
+  el.textContent = text;
+  el.style.left = ((_pp.x + 1) / 2 * innerWidth) + 'px';
+  el.style.top = ((1 - _pp.y) / 2 * innerHeight) + 'px';
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 1200);
+}
+
+// ---------- Игровая логика ----------
+let score = 0, speed = 0, gait = 0, jumpY = 0, jumpV = 0;
+let barkT = 0, shakeT = 0, rearAmt = 0, rearT = 0, idleT = 0;
+let blinkNext = 2.5, blinkDur = 0, spawnT = 0, peeing = null;
+const _dir = new THREE.Vector3();
+
+function bark() {
+  if (jumpY === 0) jumpV = 5.5;
+  sfxBark();
+  barkT = 0.4;
+  popup(pick(['Гав!', 'Гав-гав!', 'Р-р-гав!']), jam.position.x, jam.position.y + 2.4, jam.position.z);
+}
+
+function startPee(pile) {
+  pile.userData.target = true;
+  const dx = pile.position.x - jam.position.x, dz = pile.position.z - jam.position.z;
+  jam.rotation.y = Math.atan2(-dx, -dz);   // встаёт задом к куче
+  peeing = { pile, t: 0, done: false };
+  startPeeSound();
+  rearT = 0;
+}
+
+function update(dt, t) {
+  // 1) Кучи: появление, исчезновение, покачивание
+  spawnT -= dt;
+  if (spawnT <= 0 && piles.filter((p) => !p.userData.dying).length < PILE_MAX) {
+    const s = findSpot();
+    if (s) spawnPile(s.x, s.z);
+    spawnT = rand(1.8, 3);
+  }
+  for (let i = piles.length - 1; i >= 0; i--) {
+    const p = piles[i], u = p.userData;
+    if (u.dying) {
+      u.dyingT += dt;
+      const k = Math.min(1, u.dyingT / 0.4);
+      p.scale.setScalar(Math.max(0.001, 1 - k));
+      p.rotation.y += dt * 10;
+      if (k >= 1) {
+        scene.remove(p);
+        p.children.forEach((c) => c.geometry.dispose());
+        piles.splice(i, 1);
+      }
+    } else if (u.spawnT < 0.6) {
+      u.spawnT += dt;
+      p.scale.setScalar(Math.max(0.001, easeOutBack(Math.min(1, u.spawnT / 0.6))));
+    } else {
+      p.rotation.y = Math.sin(t * 1.6 + u.phase) * 0.06;
+    }
+  }
+
+  // 2) Управление и движение
+  const kx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  const kz = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+  _dir.set(0, 0, 0);
+  if (kx || kz) {
+    _dir.set(kx, 0, kz);
+    pointerTarget = null;
+  } else if (pointerTarget) {
+    _dir.set(pointerTarget.x - jam.position.x, 0, pointerTarget.z - jam.position.z);
+    if (_dir.length() < 0.5) pointerTarget = null;
+  } else if (autoRun) {
+    const p = nearestPile();
+    if (p) {
+      _dir.set(p.position.x - jam.position.x, 0, p.position.z - jam.position.z);
+      if (_dir.length() < 1.1) _dir.set(0, 0, 0);
+    }
+  }
+  if (peeing) _dir.set(0, 0, 0);
+  const moving = _dir.lengthSq() > 0.0001;
+  if (moving) { _dir.normalize(); rearT = 0; }
+
+  speed = lerp(speed, moving ? RUN : 0, 1 - Math.exp(-8 * dt));
+  if (moving) {
+    const want = Math.atan2(_dir.x, _dir.z);
+    let diff = want - jam.rotation.y;
+    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+    jam.rotation.y += diff * Math.min(1, dt * 10);
+  }
+  jam.position.x = clamp(jam.position.x + _dir.x * speed * dt, -BOUND, BOUND);
+  jam.position.z = clamp(jam.position.z + _dir.z * speed * dt, -BOUND, BOUND);
+
+  // 3) Проверка: подбежал к куче — писает
+  if (!peeing && rearAmt < 0.3) {
+    for (const p of piles) {
+      const u = p.userData;
+      if (u.dying || u.target || u.spawnT < 0.6) continue;
+      if (Math.hypot(p.position.x - jam.position.x, p.position.z - jam.position.z) < 1.5) {
+        startPee(p);
+        break;
+      }
+    }
+  }
+
+  // 4) Процесс писания
+  if (peeing) {
+    peeing.t += dt;
+    const lift = smooth(0.2, 0.45, peeing.t) * (1 - smooth(1.15, 1.4, peeing.t));
+    hindR.rotation.z = lift * 1.05;               // задняя лапа поднимается
+    bob.position.x = Math.sin(peeing.t * 45) * 0.015 * lift; // дрожит от усердия
+    if (peeing.t > 0.4 && peeing.t < 1.25) {
+      const n = Math.max(1, Math.round(dt * 110));
+      for (let i = 0; i < n; i++) emitStream(peeing.pile);
+    }
+    if (!peeing.done && peeing.t >= 1.3) {
+      peeing.done = true;
+      const p = peeing.pile;
+      p.userData.dying = true;
+      burst(p.position.x, 0.4, p.position.z, 16);
+      sfxLeaves();
+      sfxCoin();
+      score++;
+      scoreEl.textContent = score;
+      popup(pick(PEE_LINES), jam.position.x, jam.position.y + 2.2, jam.position.z);
+    }
+    if (peeing.t >= 1.5) {
+      peeing = null;
+      hindR.rotation.z = 0;
+      bob.position.x = 0;
+      stopPeeSound();
+      shakeT = 0.6;                               // отряхивается
+    }
+  }
+
+  // 5) Прыжок
+  if (jumpY > 0 || jumpV > 0) {
+    jumpV -= 18 * dt;
+    jumpY += jumpV * dt;
+    if (jumpY <= 0) { jumpY = 0; jumpV = 0; }
+  }
+  jam.position.y = jumpY;
+
+  // 6) Встать на задние лапы, если долго стоит (как на фото)
+  if (moving || peeing) {
+    idleT = 0; rearT = 0;
+  } else {
+    idleT += dt;
+    if (idleT > 4 && rearT <= 0) { rearT = 2.6; idleT = 0; sfxRear(); }
+  }
+  if (rearT > 0) rearT -= dt;
+  const rearTarget = rearT > 0 && !peeing ? 1 : 0;
+  rearAmt = lerp(rearAmt, rearTarget, 1 - Math.exp(-6 * dt));
+  rearPivot.rotation.x = -1.3 * rearAmt;
+
+  // 7) Бег: шаги, подпрыгивание, уши, язык
+  const k = clamp(speed / RUN, 0, 1);
+  gait += dt * (2 + speed * 1.5);
+  const sw = Math.sin(gait) * 0.75 * k;
+  frontL.rotation.x = sw;
+  frontR.rotation.x = -sw;
+  hindL.rotation.x = -sw - rearPivot.rotation.x;   // компенсация, чтобы задние лапы стояли ровно
+  hindR.rotation.x = sw - rearPivot.rotation.x;
+  bob.position.y = -0.9 + Math.abs(Math.sin(gait)) * 0.12 * k;
+  if (shakeT > 0) {
+    shakeT -= dt;
+    bob.rotation.z = Math.sin(shakeT * 55) * 0.18 * (shakeT / 0.6);
+  } else {
+    bob.rotation.z = 0;
+  }
+
+  // 8) Голова, уши, хвост, моргание
+  if (barkT > 0) barkT -= dt;
+  headPivot.rotation.x = Math.sin(gait * 2) * 0.07 * k + (barkT > 0 ? -0.3 * Math.sin((barkT / 0.4) * Math.PI) : 0);
+  earL.rotation.z = -0.6 + Math.sin(gait * 2) * 0.15 * k;
+  earR.rotation.z = 0.25 + Math.sin(gait * 2 + 1) * 0.15 * k;
+  tailWag.rotation.y = Math.sin(t * (moving ? 16 : 5)) * (moving ? 0.6 : 0.3);
+  tongue.visible = k > 0.5;
+
+  blinkNext -= dt;
+  if (blinkNext < 0) { blinkNext = rand(2, 4.5); blinkDur = 0.12; }
+  if (blinkDur > 0) { blinkDur -= dt; eyes.scale.y = 0.12; } else { eyes.scale.y = 1; }
+
+  // 9) Камера следует за Джемом
+  camera.position.x = lerp(camera.position.x, jam.position.x, 1 - Math.exp(-4 * dt));
+  camera.position.z = lerp(camera.position.z, jam.position.z + 13, 1 - Math.exp(-4 * dt));
+  camera.lookAt(jam.position.x, 0.9, jam.position.z);
+
+  updateLeaves(dt, t);
+  updateParticles(dt);
+}
+
+// ---------- Старт ----------
+for (let i = 0; i < 5; i++) {
+  const s = findSpot();
+  if (s) spawnPile(s.x, s.z);
+}
+setTimeout(() => { hint.style.opacity = '0'; }, 12000);
+
+let last = performance.now() / 1000, time = 0;
+function frame(now) {
+  const tNow = now / 1000;
+  const dt = Math.min(0.05, tNow - last);
+  last = tNow;
+  time += dt;
+  update(dt, time);
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
