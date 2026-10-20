@@ -648,11 +648,11 @@ function update(dt, t) {
       if (_dir.length() < 1.1) _dir.set(0, 0, 0);
     }
   }
-  if (peeing || dizzyT > 0) _dir.set(0, 0, 0);
+  if (peeing || dizzyT > 0 || fightT > 0) _dir.set(0, 0, 0);
   const moving = _dir.lengthSq() > 0.0001;
   if (moving) _dir.normalize();
 
-  speed = lerp(speed, moving ? (flee ? RUN * 1.3 : RUN) : 0, 1 - Math.exp(-8 * dt));
+  speed = lerp(speed, moving ? (flee || angryT > 0 ? RUN * 1.3 : RUN) : 0, 1 - Math.exp(-8 * dt));
   if (moving) {
     const want = Math.atan2(_dir.x, _dir.z);
     let diff = want - jam.rotation.y;
@@ -662,15 +662,18 @@ function update(dt, t) {
   jam.position.x = clamp(jam.position.x + _dir.x * speed * dt, -BOUND, BOUND);
   jam.position.z = clamp(jam.position.z + _dir.z * speed * dt, -BOUND, BOUND);
 
-  // 2b) Леви: если Джем с ним пересёкся — пугается и убегает
+  // 2b) Кай: драка при встрече (кроме 20 секунд после драки). Леви: если Джем с ним пересёкся — пугается и убегает
   if (dizzyT > 0) dizzyT -= dt;
   if (fleeCool > 0) fleeCool -= dt;
-  if (!flee && fleeCool <= 0 && Math.hypot(jam.position.x - leviRoot.position.x, jam.position.z - leviRoot.position.z) < LEVI_SCARE_R) {
+  if (angryT > 0) angryT -= dt;
+  if (fightT <= 0 && angryT <= 0 && Math.hypot(jam.position.x - kai.position.x, jam.position.z - kai.position.z) < KAI_R) {
+    startFight();
+  } else if (fightT <= 0 && !flee && fleeCool <= 0 && Math.hypot(jam.position.x - leviRoot.position.x, jam.position.z - leviRoot.position.z) < LEVI_SCARE_R) {
     startScare();
   }
 
   // 3) Проверка: подбежал к куче — писает, а к куче с какашкой — кружится голова
-  if (!peeing && dizzyT <= 0 && !flee) {
+  if (!peeing && dizzyT <= 0 && !flee && fightT <= 0) {
     for (const p of piles) {
       const u = p.userData;
       if (u.dying || u.target || u.spawnT < 0.6) continue;
@@ -721,7 +724,7 @@ function update(dt, t) {
   jam.position.y = jumpY;
 
   // 6) Если долго не двигается — ложится клубочком и спит
-  const resting = !moving && !peeing && dizzyT <= 0 && !flee;
+  const resting = !moving && !peeing && dizzyT <= 0 && !flee && fightT <= 0;
   idleT = resting ? idleT + dt : 0;
   sleeping = idleT > 4;
   sleepAmt = lerp(sleepAmt, sleeping ? 1 : 0, 1 - Math.exp(-(sleeping ? 2 : 6) * dt));
@@ -758,6 +761,8 @@ function update(dt, t) {
   if (blinkDur > 0) { blinkDur -= dt; eyes.scale.y = 0.12; } else { eyes.scale.y = 1; }
   if (sleepAmt > 0.5) eyes.scale.y = 0.1;   // спит с закрытыми глазами
 
+  updateFight(dt, t);
+
   // 9) Камера следует за Джемом
   camera.position.x = lerp(camera.position.x, jam.position.x, 1 - Math.exp(-4 * dt));
   camera.position.z = lerp(camera.position.z, jam.position.z + 13, 1 - Math.exp(-4 * dt));
@@ -766,6 +771,9 @@ function update(dt, t) {
   updateLevi(dt, t);
   updateFouled(dt, t);
   updateDizzy(t);
+  updateKai(dt, t);
+  updateToys(dt);
+  updateAnger(t);
   updateLeaves(dt, t);
   updateParticles(dt);
 }
@@ -1039,6 +1047,268 @@ function updateLevi(dt, t) {
   leviBody.position.x = Math.sin(t * 45) * 0.012 * sq;   // тужится
   leviTail.rotation.x = -2.5 + 1.5 * sq;                 // хвост поднимается
   leviTailWag.rotation.y = Math.sin(t * (k > 0.1 ? 7 : 2.5)) * 0.3;
+}
+
+// ---------- Кай: корги, носится от края к краю и дерётся с Джемом ----------
+const KAI_SPEED = 9, KAI_R = 1.25, FIGHT_TIME = 4, ANGRY_TIME = 20;
+const KAI_BLACK = new THREE.MeshStandardMaterial({ color: 0x262220, flatShading: true, roughness: 0.8 });
+const KAI_TAN = new THREE.MeshStandardMaterial({ color: 0x8f5d33, flatShading: true, roughness: 0.8 });
+const KAI_WHITE = new THREE.MeshStandardMaterial({ color: 0xf3f0ea, flatShading: true, roughness: 0.8 });
+const KAI_EYE = new THREE.MeshStandardMaterial({ color: 0xb8702a, flatShading: true, roughness: 0.4 });
+
+const kai = new THREE.Group();          // корень: позиция на земле, поворот
+scene.add(kai);
+const kaiBody = new THREE.Group();      // тело: подпрыгивание, дрожь в драке
+kai.add(kaiBody);
+const kaiTorsoGeo = new THREE.CylinderGeometry(0.34, 0.36, 1.5, 7);
+kaiTorsoGeo.rotateX(Math.PI / 2);
+kaiBody.add(part(kaiTorsoGeo, KAI_BLACK, 0, 0.75, 0));
+kaiBody.add(part(new THREE.IcosahedronGeometry(0.3, 1), KAI_TAN, 0.3, 0.7, -0.1, 0.5, 0.8, 1.1));   // рыжие бока
+kaiBody.add(part(new THREE.IcosahedronGeometry(0.3, 1), KAI_WHITE, 0, 0.6, 0.6, 1, 1, 0.8));         // белая грудь
+
+const makeKaiLeg = (x, z) => {          // короткие лапы корги
+  const g = new THREE.Group();
+  g.position.set(x, 0.5, z);
+  g.add(part(new THREE.BoxGeometry(0.16, 0.42, 0.16), KAI_TAN, 0, -0.21, 0));
+  g.add(part(new THREE.BoxGeometry(0.19, 0.1, 0.22), KAI_WHITE, 0, -0.47, 0.03));
+  kaiBody.add(g);
+  return g;
+};
+const kaiFL = makeKaiLeg(-0.2, 0.5), kaiFR = makeKaiLeg(0.2, 0.5);
+const kaiBL = makeKaiLeg(-0.2, -0.5), kaiBR = makeKaiLeg(0.2, -0.5);
+
+const kaiHead = new THREE.Group();
+kaiHead.position.set(0, 0.98, 0.9);
+kaiBody.add(kaiHead);
+kaiHead.add(part(new THREE.IcosahedronGeometry(0.3, 1), KAI_BLACK, 0, 0, 0, 1, 0.95, 1.05));
+kaiHead.add(part(new THREE.BoxGeometry(0.22, 0.2, 0.36), KAI_WHITE, 0, -0.08, 0.28));   // белая морда
+kaiHead.add(part(new THREE.IcosahedronGeometry(0.07, 0), matD, 0, 0, 0.5));              // нос
+[-1, 1].forEach((s) => {
+  kaiHead.add(part(new THREE.SphereGeometry(0.05, 6, 5), KAI_EYE, s * 0.14, 0.08, 0.26));
+  kaiHead.add(part(new THREE.SphereGeometry(0.025, 5, 4), matD, s * 0.14, 0.08, 0.3));
+  const ear = new THREE.Group();        // большие стоячие уши
+  ear.position.set(s * 0.2, 0.22, -0.02);
+  ear.rotation.z = s * 0.18;
+  ear.add(part(new THREE.ConeGeometry(0.14, 0.4, 4), KAI_BLACK, 0, 0.2, 0));
+  kaiHead.add(ear);
+});
+
+const kaiTail = new THREE.Group();      // хвост торчит вверх-назад, с белым кончиком
+kaiTail.position.set(0, 0.85, -0.78);
+kaiTail.rotation.x = -0.9;
+kaiBody.add(kaiTail);
+kaiTail.add(part(new THREE.CylinderGeometry(0.07, 0.1, 0.5, 5), KAI_BLACK, 0, 0.25, 0));
+kaiTail.add(part(new THREE.ConeGeometry(0.08, 0.14, 5), KAI_WHITE, 0, 0.55, 0));
+
+// бег: ping-pong — прямая линия, отражение от краёв карты
+const kaiAI = { vx: 0, vz: 0, gait: 0 };
+const kaiDir = rand(0, Math.PI * 2);
+kaiAI.vx = Math.cos(kaiDir);
+kaiAI.vz = Math.sin(kaiDir);
+kai.position.set(rand(-BOUND + 4, BOUND - 4), 0, rand(-BOUND + 4, BOUND - 4));
+
+function updateKai(dt, t) {
+  if (fightT > 0) return;
+  const K = kaiAI, p = kai.position;
+  p.x += K.vx * KAI_SPEED * dt;
+  p.z += K.vz * KAI_SPEED * dt;
+  if (Math.abs(p.x) > BOUND - 1) { p.x = clamp(p.x, -BOUND + 1, BOUND - 1); K.vx = -K.vx; }
+  if (Math.abs(p.z) > BOUND - 1) { p.z = clamp(p.z, -BOUND + 1, BOUND - 1); K.vz = -K.vz; }
+  turnTo(kai, Math.atan2(K.vx, K.vz), dt, 14);
+
+  K.gait += dt * KAI_SPEED * 1.6;
+  const sw = Math.sin(K.gait) * 0.9;     // рысь: диагональные пары лап
+  kaiFL.rotation.x = sw;
+  kaiBR.rotation.x = sw;
+  kaiFR.rotation.x = -sw;
+  kaiBL.rotation.x = -sw;
+  kaiBody.position.x = 0;
+  kaiBody.position.y = Math.abs(Math.sin(K.gait)) * 0.12;
+  kaiTail.rotation.z = Math.sin(t * 10) * 0.2;
+}
+
+// облако драки: полупрозрачные комки вокруг точки стычки
+const cloud = new THREE.Group();
+cloud.visible = false;
+scene.add(cloud);
+const CLOUD_MATS = [0xf1ede4, 0xc2ad8f, 0x4a4238, 0xddd3c4].map((c) => new THREE.MeshStandardMaterial({
+  color: c, flatShading: true, transparent: true, opacity: 0.6, roughness: 1, depthWrite: false
+}));
+const cloudPuffs = Array.from({ length: 9 }, () => {
+  const m = new THREE.Mesh(new THREE.IcosahedronGeometry(rand(0.4, 0.7), 0), pick(CLOUD_MATS));
+  m.userData = { a: rand(0, 6.28), r: rand(0.1, 0.5), h: rand(0.5, 1.3), s: rand(3, 6), phase: rand(0, 6) };
+  cloud.add(m);
+  return m;
+});
+function updateCloud(t) {
+  cloud.position.set(fightAt.x, 0, fightAt.z);
+  for (const m of cloudPuffs) {
+    const u = m.userData, a = u.a + t * 1.2, rr = u.r * (0.8 + 0.2 * Math.sin(t * 2 + u.phase));
+    m.position.set(Math.cos(a) * rr, u.h + Math.sin(t * 3 + u.phase) * 0.08, Math.sin(a) * rr);
+    m.scale.setScalar(1 + 0.15 * Math.sin(t * u.s + u.phase));
+  }
+}
+
+// игрушки, которые вылетают из облака
+const TOY_BALL = new THREE.SphereGeometry(0.15, 8, 6);
+const TOY_RING = new THREE.TorusGeometry(0.14, 0.05, 6, 10);
+const TOY_MATS = [0xe53935, 0xffca28, 0x42a5f5, 0x66bb6a, 0xec407a].map((c) => new THREE.MeshStandardMaterial({ color: c, flatShading: true, roughness: 0.6 }));
+const BONE_MAT = new THREE.MeshStandardMaterial({ color: 0xfff3dc, flatShading: true, roughness: 0.6 });
+const BONE_TEMPLATE = new THREE.Group();
+const boneShaft = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.28, 6), BONE_MAT);
+boneShaft.rotation.z = Math.PI / 2;
+BONE_TEMPLATE.add(boneShaft);
+[-0.14, 0.14].forEach((x) => {
+  [-0.05, 0.05].forEach((y) => {
+    const end = new THREE.Mesh(new THREE.SphereGeometry(0.075, 6, 5), BONE_MAT);
+    end.position.set(x, y, 0);
+    BONE_TEMPLATE.add(end);
+  });
+});
+const toys = [];
+function makeToy() {
+  const r = Math.random();
+  if (r < 0.4) return new THREE.Mesh(TOY_BALL, pick(TOY_MATS));
+  if (r < 0.7) return new THREE.Mesh(TOY_RING, pick(TOY_MATS));
+  return BONE_TEMPLATE.clone();
+}
+function throwToy(x, y, z) {
+  const toy = makeToy();
+  toy.position.set(x, y, z);
+  scene.add(toy);
+  toys.push({ mesh: toy, vx: rand(-3.5, 3.5), vy: rand(4, 7), vz: rand(-3.5, 3.5), spin: rand(-14, 14), life: 2.2 });
+}
+function updateToys(dt) {
+  for (let i = toys.length - 1; i >= 0; i--) {
+    const o = toys[i], m = o.mesh;
+    o.life -= dt;
+    o.vy -= G * dt;
+    m.position.x += o.vx * dt;
+    m.position.y += o.vy * dt;
+    m.position.z += o.vz * dt;
+    if (m.position.y < 0.15) { m.position.y = 0.15; o.vy *= -0.45; o.vx *= 0.7; o.vz *= 0.7; }
+    m.rotation.x += o.spin * dt;
+    m.rotation.z += o.spin * 0.6 * dt;
+    if (o.life <= 0) { scene.remove(m); toys.splice(i, 1); }
+  }
+}
+
+function sfxScuffle() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  noiseHit(t, 0.12, 0.18, 1400, sfxBus, 'bandpass');
+  tone('square', 520 + rand(-80, 80), 260, 0.14, 0.12, t, sfxBus);
+}
+
+// драка: 4 секунды, Джем и Кай стоят друг напротив друга и мелькают лапами
+let fightT = 0, angryT = 0, fightSndT = 0, fightThrowT = 0;
+let fightDir = { x: 1, z: 0 }, fightAt = { x: 0, z: 0 };
+const DUST_COLOR = new THREE.Color(0xd8c6a0);
+
+function startFight() {
+  cancelPee();
+  flee = null;
+  dizzyT = 0;
+  pointerTarget = null;
+  const dx = kai.position.x - jam.position.x, dz = kai.position.z - jam.position.z, d = Math.hypot(dx, dz) || 1;
+  fightDir = { x: dx / d, z: dz / d };
+  fightAt = { x: (jam.position.x + kai.position.x) / 2, z: (jam.position.z + kai.position.z) / 2 };
+  fightT = FIGHT_TIME;
+  fightSndT = 0;
+  fightThrowT = 0;
+  popup('Р-р-р!', fightAt.x, 2.6, fightAt.z);
+}
+
+function endFight() {
+  angryT = ANGRY_TIME;
+  cloud.visible = false;
+  popup('Ну всё, хватит!', jam.position.x, jam.position.y + 2.4, jam.position.z);
+}
+
+function updateFight(dt, t) {
+  cloud.visible = fightT > 0;
+  if (fightT <= 0) return;
+  fightT -= dt;
+  const d = fightDir;
+  jam.position.x = fightAt.x - d.x * 0.75;
+  jam.position.z = fightAt.z - d.z * 0.75;
+  jam.rotation.y = Math.atan2(d.x, d.z);
+  kai.position.set(fightAt.x + d.x * 0.75, 0, fightAt.z + d.z * 0.75);
+  kai.rotation.y = Math.atan2(-d.x, -d.z);
+
+  // мелькающие лапы, дёргающиеся головы и тела
+  const f = Math.sin(t * 30), g = Math.sin(t * 34 + 1);
+  frontL.rotation.x = f;
+  frontR.rotation.x = -f;
+  hindL.rotation.x = -f;
+  hindR.rotation.x = f;
+  headPivot.rotation.x = 0.15 + Math.sin(t * 22) * 0.2;
+  bob.rotation.z = Math.sin(t * 40) * 0.08;
+  kaiFL.rotation.x = g * 1.1;
+  kaiBR.rotation.x = g * 1.1;
+  kaiFR.rotation.x = -g * 1.1;
+  kaiBL.rotation.x = -g * 1.1;
+  kaiBody.position.x = Math.sin(t * 38) * 0.05;
+  kaiBody.position.y = Math.abs(Math.sin(t * 17)) * 0.15;
+  kaiHead.rotation.x = Math.sin(t * 25) * 0.2;
+
+  updateCloud(t);
+
+  // пыль и игрушки из облака, звуки стычки
+  for (let n = 0; n < 3; n++) {
+    emit(fightAt.x + rand(-0.5, 0.5), rand(0.1, 0.5), fightAt.z + rand(-0.5, 0.5),
+      rand(-1.2, 1.2), rand(0.8, 2.2), rand(-1.2, 1.2), DUST_COLOR, rand(0.5, 0.9), 2);
+  }
+  fightThrowT -= dt;
+  if (fightThrowT <= 0) {
+    fightThrowT = 0.22;
+    throwToy(fightAt.x + rand(-0.4, 0.4), 1.2, fightAt.z + rand(-0.4, 0.4));
+  }
+  fightSndT -= dt;
+  if (fightSndT <= 0) {
+    fightSndT = 0.3;
+    sfxScuffle();
+  }
+
+  if (fightT <= 0) endFight();
+}
+
+// значок злости над головой Джема (как в аниме)
+function makeAngerTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.translate(64, 64);
+  g.lineCap = 'round';
+  for (const [w, col] of [[30, '#3a0000'], [20, '#e8262b']]) {
+    g.strokeStyle = col;
+    g.lineWidth = w;
+    for (let k = 0; k < 4; k++) {
+      const a = Math.PI / 4 + k * Math.PI / 2;
+      g.beginPath();
+      g.moveTo(0, 0);
+      g.lineTo(Math.cos(a) * 34, Math.sin(a) * 34);
+      g.stroke();
+    }
+  }
+  g.fillStyle = '#ffffff';
+  for (let k = 0; k < 4; k++) {
+    const a = Math.PI / 4 + k * Math.PI / 2;
+    g.beginPath();
+    g.arc(Math.cos(a) * 30 - 4, Math.sin(a) * 30 - 4, 4, 0, Math.PI * 2);
+    g.fill();
+  }
+  return new THREE.CanvasTexture(c);
+}
+const angerSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeAngerTexture(), transparent: true, depthTest: false }));
+angerSprite.visible = false;
+scene.add(angerSprite);
+
+function updateAnger(t) {
+  angerSprite.visible = angryT > 0;
+  if (!angerSprite.visible) return;
+  angerSprite.position.set(jam.position.x, jam.position.y + 2.5, jam.position.z);
+  angerSprite.scale.setScalar(1.2 + Math.sin(t * 10) * 0.12);
 }
 
 // ---------- Старт ----------
