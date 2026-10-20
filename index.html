@@ -583,12 +583,24 @@ let blinkNext = 2.5, blinkDur = 0, spawnT = 0, peeing = null;
 const _dir = new THREE.Vector3();
 let dizzyT = 0, flee = null, fleeCool = 0;   // головокружение, бегство от Леви, пауза после бегства
 
+let barkTimes = [];   // времена последних гавков (игровое время)
+
 function bark() {
   if (jumpY === 0) jumpV = 5.5;
   sfxBark();
   barkT = 0.4;
   idleT = 0;   // проснулся
   popup(pick(['Гав!', 'Гав-гав!', 'Р-р-гав!']), jam.position.x, jam.position.y + 2.4, jam.position.z);
+
+  // три гава подряд (не дольше 2.5 секунды) — Кай и Леви убегают от Джема
+  barkTimes = barkTimes.filter((bt) => time - bt < 2.5);
+  barkTimes.push(time);
+  if (barkTimes.length >= 3) {
+    barkTimes = [];
+    kaiRunAway();
+    leviRunAway();
+    popup('Пошли вон!', jam.position.x, jam.position.y + 2.8, jam.position.z);
+  }
 }
 
 function startPee(pile) {
@@ -938,7 +950,7 @@ leviTailWag.add(leviTail);
 leviTail.add(part(new THREE.CylinderGeometry(0.06, 0.09, 0.8, 5), LEVI_BLACK, 0, 0.4, 0));
 
 // состояния: idle (стоит) → walk (идёт) → poop (какает на кучу) → idle
-const leviAI = { state: 'idle', t: 2, el: 0, pooped: false, tx: 0, tz: 0, pile: null, poopCool: rand(4, 8), speed: 0, gait: 0 };
+const leviAI = { state: 'idle', t: 2, el: 0, pooped: false, tx: 0, tz: 0, pile: null, poopCool: rand(4, 8), speed: 0, gait: 0, run: false };
 
 function turnTo(obj, want, dt, rate) {
   let diff = want - obj.rotation.y;
@@ -968,8 +980,20 @@ function leviGoIdle(wait = rand(1.5, 4)) {
   const L = leviAI;
   if (L.pile) L.pile.userData.target = false;
   L.pile = null;
+  L.run = false;
   L.state = 'idle';
   L.t = wait;
+}
+
+// команда «пошли вон»: Леви отбегает на 3 метра от Джема
+function leviRunAway() {
+  const L = leviAI, p = leviRoot.position;
+  leviGoIdle(0);
+  const dx = p.x - jam.position.x, dz = p.z - jam.position.z, d = Math.hypot(dx, dz) || 1;
+  L.tx = clamp(p.x + dx / d * 3, -BOUND + 2, BOUND - 2);
+  L.tz = clamp(p.z + dz / d * 3, -BOUND + 2, BOUND - 2);
+  L.run = true;
+  L.state = 'walk';
 }
 
 // пора какать и чистых куч хватает (не меньше LEVI_CLEAN_MIN после какашки) — берём кучу
@@ -999,17 +1023,17 @@ function updateLevi(dt, t) {
       L.state = 'walk';
     }
   } else if (L.state === 'walk') {
-    if (!L.pile) leviTryPile();   // в пути тоже может переключиться на кучу, если пора какать
+    if (!L.pile && !L.run) leviTryPile();   // в пути тоже может переключиться на кучу, если пора какать
     if (L.pile && (L.pile.userData.dying || L.pile.userData.fouled)) {
       leviGoIdle();
     } else {
       const dx = L.tx - p.x, dz = L.tz - p.z, d = Math.hypot(dx, dz);
-      if (d < (L.pile ? 2.4 : 0.5)) {
+      if (d < (L.pile ? 2.4 : L.run ? 0.2 : 0.5)) {
         if (L.pile) { L.state = 'poop'; L.el = 0; L.pooped = false; }
         else leviGoIdle();
       } else {
         turnTo(leviRoot, Math.atan2(dx, dz), dt, 3);
-        L.speed = lerp(L.speed, LEVI_SPEED, 1 - Math.exp(-3 * dt));
+        L.speed = lerp(L.speed, L.run ? LEVI_SPEED * 2 : LEVI_SPEED, 1 - Math.exp(-(L.run ? 6 : 3) * dt));
         p.x = clamp(p.x + dx / d * L.speed * dt, -BOUND + 2, BOUND - 2);
         p.z = clamp(p.z + dz / d * L.speed * dt, -BOUND + 2, BOUND - 2);
       }
@@ -1050,40 +1074,41 @@ function updateLevi(dt, t) {
 }
 
 // ---------- Кай: корги, носится от края к краю и дерётся с Джемом ----------
-const KAI_SPEED = 9, KAI_R = 1.25, FIGHT_TIME = 4, ANGRY_TIME = 20;
-const KAI_BLACK = new THREE.MeshStandardMaterial({ color: 0x262220, flatShading: true, roughness: 0.8 });
-const KAI_TAN = new THREE.MeshStandardMaterial({ color: 0x8f5d33, flatShading: true, roughness: 0.8 });
+const KAI_SPEED = 9, KAI_R = 1.6, KAI_SCALE = 1.5, FIGHT_TIME = 4, ANGRY_TIME = 20;
+const KAI_BLACK = new THREE.MeshStandardMaterial({ color: 0x1f1d1c, flatShading: true, roughness: 0.8 });
 const KAI_WHITE = new THREE.MeshStandardMaterial({ color: 0xf3f0ea, flatShading: true, roughness: 0.8 });
-const KAI_EYE = new THREE.MeshStandardMaterial({ color: 0xb8702a, flatShading: true, roughness: 0.4 });
+const KAI_EYE = new THREE.MeshStandardMaterial({ color: 0x4a2a14, flatShading: true, roughness: 0.4 });
 
-const kai = new THREE.Group();          // корень: позиция на земле, поворот
+const kai = new THREE.Group();          // корень: позиция на земле, поворот; ростом между Джемом и Леви
+kai.scale.setScalar(KAI_SCALE);
 scene.add(kai);
 const kaiBody = new THREE.Group();      // тело: подпрыгивание, дрожь в драке
 kai.add(kaiBody);
 const kaiTorsoGeo = new THREE.CylinderGeometry(0.34, 0.36, 1.5, 7);
 kaiTorsoGeo.rotateX(Math.PI / 2);
 kaiBody.add(part(kaiTorsoGeo, KAI_BLACK, 0, 0.75, 0));
-kaiBody.add(part(new THREE.IcosahedronGeometry(0.3, 1), KAI_TAN, 0.3, 0.7, -0.1, 0.5, 0.8, 1.1));   // рыжие бока
 kaiBody.add(part(new THREE.IcosahedronGeometry(0.3, 1), KAI_WHITE, 0, 0.6, 0.6, 1, 1, 0.8));         // белая грудь
 
-const makeKaiLeg = (x, z) => {          // короткие лапы корги
+const makeKaiLeg = (x, z, mat) => {     // короткие лапы корги: передние белые, задние чёрные
   const g = new THREE.Group();
   g.position.set(x, 0.5, z);
-  g.add(part(new THREE.BoxGeometry(0.16, 0.42, 0.16), KAI_TAN, 0, -0.21, 0));
+  g.add(part(new THREE.BoxGeometry(0.16, 0.42, 0.16), mat, 0, -0.21, 0));
   g.add(part(new THREE.BoxGeometry(0.19, 0.1, 0.22), KAI_WHITE, 0, -0.47, 0.03));
   kaiBody.add(g);
   return g;
 };
-const kaiFL = makeKaiLeg(-0.2, 0.5), kaiFR = makeKaiLeg(0.2, 0.5);
-const kaiBL = makeKaiLeg(-0.2, -0.5), kaiBR = makeKaiLeg(0.2, -0.5);
+const kaiFL = makeKaiLeg(-0.2, 0.5, KAI_WHITE), kaiFR = makeKaiLeg(0.2, 0.5, KAI_WHITE);
+const kaiBL = makeKaiLeg(-0.2, -0.5, KAI_BLACK), kaiBR = makeKaiLeg(0.2, -0.5, KAI_BLACK);
 
 const kaiHead = new THREE.Group();
 kaiHead.position.set(0, 0.98, 0.9);
 kaiBody.add(kaiHead);
-kaiHead.add(part(new THREE.IcosahedronGeometry(0.3, 1), KAI_BLACK, 0, 0, 0, 1, 0.95, 1.05));
+kaiHead.add(part(new THREE.IcosahedronGeometry(0.3, 1), KAI_WHITE, 0, 0, 0, 1, 0.95, 1.05));   // белая голова
+kaiHead.add(part(new THREE.IcosahedronGeometry(0.31, 1), KAI_BLACK, 0, 0.13, -0.02, 1.02, 0.5, 1.02));   // чёрная «шапка»
 kaiHead.add(part(new THREE.BoxGeometry(0.22, 0.2, 0.36), KAI_WHITE, 0, -0.08, 0.28));   // белая морда
 kaiHead.add(part(new THREE.IcosahedronGeometry(0.07, 0), matD, 0, 0, 0.5));              // нос
 [-1, 1].forEach((s) => {
+  kaiHead.add(part(new THREE.SphereGeometry(0.09, 6, 5), KAI_BLACK, s * 0.15, 0.1, 0.2));   // чёрное пятно у глаза
   kaiHead.add(part(new THREE.SphereGeometry(0.05, 6, 5), KAI_EYE, s * 0.14, 0.08, 0.26));
   kaiHead.add(part(new THREE.SphereGeometry(0.025, 5, 4), matD, s * 0.14, 0.08, 0.3));
   const ear = new THREE.Group();        // большие стоячие уши
@@ -1125,6 +1150,15 @@ function updateKai(dt, t) {
   kaiBody.position.x = 0;
   kaiBody.position.y = Math.abs(Math.sin(K.gait)) * 0.12;
   kaiTail.rotation.z = Math.sin(t * 10) * 0.2;
+}
+
+// команда «пошли вон»: Кай бежит в сторону от Джема
+function kaiRunAway() {
+  const K = kaiAI, p = kai.position;
+  const dx = p.x - jam.position.x, dz = p.z - jam.position.z, d = Math.hypot(dx, dz);
+  const a = d < 0.01 ? rand(0, Math.PI * 2) : Math.atan2(dz, dx);
+  K.vx = Math.cos(a);
+  K.vz = Math.sin(a);
 }
 
 // облако драки: полупрозрачные комки вокруг точки стычки
@@ -1230,10 +1264,10 @@ function updateFight(dt, t) {
   if (fightT <= 0) return;
   fightT -= dt;
   const d = fightDir;
-  jam.position.x = fightAt.x - d.x * 0.75;
-  jam.position.z = fightAt.z - d.z * 0.75;
+  jam.position.x = fightAt.x - d.x * 1.2;
+  jam.position.z = fightAt.z - d.z * 1.2;
   jam.rotation.y = Math.atan2(d.x, d.z);
-  kai.position.set(fightAt.x + d.x * 0.75, 0, fightAt.z + d.z * 0.75);
+  kai.position.set(fightAt.x + d.x * 1.2, 0, fightAt.z + d.z * 1.2);
   kai.rotation.y = Math.atan2(-d.x, -d.z);
 
   // мелькающие лапы, дёргающиеся головы и тела
@@ -1273,42 +1307,45 @@ function updateFight(dt, t) {
   if (fightT <= 0) endFight();
 }
 
-// значок злости над головой Джема (как в аниме)
+// значок злости 💢 сбоку головы Джема (как в аниме): красные «вены» с чёрным контуром
 function makeAngerTexture() {
   const c = document.createElement('canvas');
-  c.width = c.height = 128;
+  c.width = c.height = 256;
   const g = c.getContext('2d');
-  g.translate(64, 64);
+  g.translate(128, 128);
   g.lineCap = 'round';
-  for (const [w, col] of [[30, '#3a0000'], [20, '#e8262b']]) {
+  const arms = [Math.PI / 4, (3 * Math.PI) / 4, (5 * Math.PI) / 4, (7 * Math.PI) / 4];
+  for (const [w, col] of [[52, '#111111'], [40, '#e8262b']]) {   // сначала контур, потом заливка
     g.strokeStyle = col;
+    g.fillStyle = col;
     g.lineWidth = w;
-    for (let k = 0; k < 4; k++) {
-      const a = Math.PI / 4 + k * Math.PI / 2;
+    for (const a of arms) {
+      const x = Math.cos(a) * 60, y = Math.sin(a) * 60;
       g.beginPath();
       g.moveTo(0, 0);
-      g.lineTo(Math.cos(a) * 34, Math.sin(a) * 34);
+      g.lineTo(x, y);
       g.stroke();
+      g.beginPath();
+      g.arc(x, y, w * 0.62, 0, Math.PI * 2);
+      g.fill();
     }
   }
   g.fillStyle = '#ffffff';
-  for (let k = 0; k < 4; k++) {
-    const a = Math.PI / 4 + k * Math.PI / 2;
+  for (const a of arms) {
     g.beginPath();
-    g.arc(Math.cos(a) * 30 - 4, Math.sin(a) * 30 - 4, 4, 0, Math.PI * 2);
+    g.arc(Math.cos(a) * 60 - 7, Math.sin(a) * 60 - 7, 6, 0, Math.PI * 2);
     g.fill();
   }
   return new THREE.CanvasTexture(c);
 }
 const angerSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: makeAngerTexture(), transparent: true, depthTest: false }));
+angerSprite.position.set(0.62, 1.62, 0.7);   // сбоку головы, едет вместе с Джемом
 angerSprite.visible = false;
-scene.add(angerSprite);
+jam.add(angerSprite);
 
 function updateAnger(t) {
   angerSprite.visible = angryT > 0;
-  if (!angerSprite.visible) return;
-  angerSprite.position.set(jam.position.x, jam.position.y + 2.5, jam.position.z);
-  angerSprite.scale.setScalar(1.2 + Math.sin(t * 10) * 0.12);
+  angerSprite.scale.setScalar(0.8 + Math.sin(t * 10) * 0.08);
 }
 
 // ---------- Старт ----------
