@@ -62,7 +62,7 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const smooth = (a, b, x) => { const k = clamp((x - a) / (b - a), 0, 1); return k * k * (3 - 2 * k); };
 const easeOutBack = (x) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
 
-const BOUND = 24, RUN = 6.4, PILE_MAX = 9, G = 9.8;
+const BOUND = 24, RUN = 6.4, PILE_MAX = 11, G = 9.8;
 const PILE_COLORS = [0xe8772e, 0xd9482b, 0xf2b632, 0xa0522d, 0xc9782f, 0x8b4a1f, 0xe9a23b];
 const PEE_COLOR = new THREE.Color(0xf5d03b);
 const PEE_LINES = ['Пшшш! 💦', 'Моя территория!', 'Ах, полегчало!', 'Ещё одна метка!', 'Сухие листья — мои!', 'Фух, хорошо 😌'];
@@ -327,7 +327,7 @@ function spawnPile(x, z) {
   }
   g.position.set(x, 0, z);
   g.scale.setScalar(0.001);
-  g.userData = { spawnT: 0, dying: false, dyingT: 0, target: false, phase: rand(0, 6) };
+  g.userData = { spawnT: 0, dying: false, dyingT: 0, target: false, fouled: false, flies: [], smokeT: 0, phase: rand(0, 6) };
   scene.add(g);
   piles.push(g);
   sfxPop();
@@ -346,7 +346,7 @@ function nearestPile() {
   let best = null, bd = Infinity;
   for (const p of piles) {
     const u = p.userData;
-    if (u.dying || u.target) continue;
+    if (u.dying || u.target || u.fouled) continue;
     const d = Math.hypot(p.position.x - jam.position.x, p.position.z - jam.position.z);
     if (d < bd) { bd = d; best = p; }
   }
@@ -493,6 +493,16 @@ function sfxCoin() {
   tone('square', 988, 988, 0.08, 0.16, t, sfxBus);
   tone('square', 1319, 1319, 0.22, 0.16, t + 0.08, sfxBus);
 }
+function sfxYelp() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  tone('square', 1100, 520, 0.22, 0.22, t, sfxBus);
+  tone('triangle', 900, 1400, 0.12, 0.15, t + 0.12, sfxBus);
+}
+function sfxDizzy() {
+  if (!actx) return;
+  tone('triangle', 620, 180, 0.5, 0.3, actx.currentTime, sfxBus);
+}
 // непрерывная «пш-ш-ш» с булькающим тоном, пока Джем писает
 function startPeeSound() {
   if (!actx || peeNodes) return;
@@ -582,6 +592,7 @@ let score = 0, speed = 0, gait = 0, jumpY = 0, jumpV = 0;
 let barkT = 0, shakeT = 0, rearAmt = 0, rearT = 0, idleT = 0;
 let blinkNext = 2.5, blinkDur = 0, spawnT = 0, peeing = null;
 const _dir = new THREE.Vector3();
+let dizzyT = 0, flee = null, fleeCool = 0;   // головокружение, бегство от Леви, пауза после бегства
 
 function bark() {
   if (jumpY === 0) jumpV = 5.5;
@@ -602,10 +613,10 @@ function startPee(pile) {
 function update(dt, t) {
   // 1) Кучи: появление, исчезновение, покачивание
   spawnT -= dt;
-  if (spawnT <= 0 && piles.filter((p) => !p.userData.dying).length < PILE_MAX) {
+  if (spawnT <= 0 && piles.filter((p) => !p.userData.dying && !p.userData.fouled).length < PILE_MAX) {
     const s = findSpot();
     if (s) spawnPile(s.x, s.z);
-    spawnT = rand(1.8, 3);
+    spawnT = rand(1.2, 2.2);
   }
   for (let i = piles.length - 1; i >= 0; i--) {
     const p = piles[i], u = p.userData;
@@ -616,7 +627,7 @@ function update(dt, t) {
       p.rotation.y += dt * 10;
       if (k >= 1) {
         scene.remove(p);
-        p.children.forEach((c) => c.geometry.dispose());
+        p.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
         piles.splice(i, 1);
       }
     } else if (u.spawnT < 0.6) {
@@ -631,7 +642,11 @@ function update(dt, t) {
   const kx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
   const kz = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
   _dir.set(0, 0, 0);
-  if (kx || kz) {
+  if (flee) {
+    flee.t += dt;
+    _dir.set(flee.x - jam.position.x, 0, flee.z - jam.position.z);
+    if (_dir.length() < 0.4 || flee.t > 3) endFlee();
+  } else if (kx || kz) {
     _dir.set(kx, 0, kz);
     pointerTarget = null;
   } else if (pointerTarget) {
@@ -644,11 +659,11 @@ function update(dt, t) {
       if (_dir.length() < 1.1) _dir.set(0, 0, 0);
     }
   }
-  if (peeing) _dir.set(0, 0, 0);
+  if (peeing || dizzyT > 0) _dir.set(0, 0, 0);
   const moving = _dir.lengthSq() > 0.0001;
   if (moving) { _dir.normalize(); rearT = 0; }
 
-  speed = lerp(speed, moving ? RUN : 0, 1 - Math.exp(-8 * dt));
+  speed = lerp(speed, moving ? (flee ? RUN * 1.3 : RUN) : 0, 1 - Math.exp(-8 * dt));
   if (moving) {
     const want = Math.atan2(_dir.x, _dir.z);
     let diff = want - jam.rotation.y;
@@ -658,13 +673,21 @@ function update(dt, t) {
   jam.position.x = clamp(jam.position.x + _dir.x * speed * dt, -BOUND, BOUND);
   jam.position.z = clamp(jam.position.z + _dir.z * speed * dt, -BOUND, BOUND);
 
-  // 3) Проверка: подбежал к куче — писает
-  if (!peeing && rearAmt < 0.3) {
+  // 2b) Леви: если Джем с ним пересёкся — пугается и убегает
+  if (dizzyT > 0) dizzyT -= dt;
+  if (fleeCool > 0) fleeCool -= dt;
+  if (!flee && fleeCool <= 0 && Math.hypot(jam.position.x - leviRoot.position.x, jam.position.z - leviRoot.position.z) < LEVI_SCARE_R) {
+    startScare();
+  }
+
+  // 3) Проверка: подбежал к куче — писает, а к куче с какашкой — кружится голова
+  if (!peeing && dizzyT <= 0 && !flee) {
     for (const p of piles) {
       const u = p.userData;
       if (u.dying || u.target || u.spawnT < 0.6) continue;
       if (Math.hypot(p.position.x - jam.position.x, p.position.z - jam.position.z) < 1.5) {
-        startPee(p);
+        if (u.fouled) startDizzy(p);
+        else if (rearAmt < 0.3) startPee(p);
         break;
       }
     }
@@ -753,8 +776,265 @@ function update(dt, t) {
   camera.position.z = lerp(camera.position.z, jam.position.z + 13, 1 - Math.exp(-4 * dt));
   camera.lookAt(jam.position.x, 0.9, jam.position.z);
 
+  updateLevi(dt, t);
+  updateFouled(dt, t);
+  updateDizzy(t);
   updateLeaves(dt, t);
   updateParticles(dt);
+}
+
+// ---------- Какашки, головокружение и испуг от Леви ----------
+function cancelPee() {
+  if (!peeing) return;
+  peeing.pile.userData.target = false;
+  peeing = null;
+  hindR.rotation.z = 0;
+  bob.position.x = 0;
+  stopPeeSound();
+}
+
+function startDizzy(pile) {
+  pile.userData.dying = true;
+  burst(pile.position.x, 0.6, pile.position.z, 10);
+  sfxDizzy();
+  dizzyT = 3;
+  pointerTarget = null;
+  popup('Ой, голова! 😵', jam.position.x, jam.position.y + 2.6, jam.position.z);
+}
+
+function startScare() {
+  cancelPee();
+  dizzyT = 0;
+  pointerTarget = null;
+  const a = Math.atan2(jam.position.z - leviRoot.position.z, jam.position.x - leviRoot.position.x), d = rand(3, 4);
+  flee = {
+    x: clamp(jam.position.x + Math.cos(a) * d, -BOUND, BOUND),
+    z: clamp(jam.position.z + Math.sin(a) * d, -BOUND, BOUND),
+    t: 0
+  };
+  sfxYelp();
+  popup(pick(['Ай!', 'Ой-ой!', 'Ужас!']), jam.position.x, jam.position.y + 2.4, jam.position.z);
+}
+
+function endFlee() {
+  flee = null;
+  fleeCool = 1.2;
+}
+
+const starShape = new THREE.Shape();
+for (let i = 0; i < 10; i++) {
+  const r = i % 2 ? 0.09 : 0.2, a = (i / 10) * Math.PI * 2 + Math.PI / 2;
+  if (i) starShape.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  else starShape.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+}
+starShape.closePath();
+const STAR_GEO = new THREE.ShapeGeometry(starShape);
+const STAR_MAT = new THREE.MeshBasicMaterial({ color: 0xffd23f, side: THREE.DoubleSide });
+const dizzyStars = new THREE.Group();   // звёздочки вокруг головы
+for (let i = 0; i < 4; i++) dizzyStars.add(new THREE.Mesh(STAR_GEO, STAR_MAT));
+dizzyStars.visible = false;
+scene.add(dizzyStars);
+
+function updateDizzy(t) {
+  dizzyStars.visible = dizzyT > 0;
+  headPivot.rotation.z = dizzyT > 0 ? Math.sin(t * 9) * 0.2 : 0;
+  if (dizzyT <= 0) return;
+  dizzyStars.position.set(jam.position.x, jam.position.y + 2.1, jam.position.z);
+  dizzyStars.children.forEach((s, i) => {
+    const a = t * 4 + (i / 4) * Math.PI * 2;
+    s.position.set(Math.cos(a) * 0.55, Math.sin(t * 6 + i) * 0.06, Math.sin(a) * 0.55);
+    s.quaternion.copy(camera.quaternion);
+  });
+}
+
+const POOP_MAT = new THREE.MeshStandardMaterial({ color: 0x5a3b1c, flatShading: true, roughness: 0.9 });
+const FLY_MAT = new THREE.MeshStandardMaterial({ color: 0x15130f, roughness: 0.4 });
+const SMOKE_COLOR = new THREE.Color(0x8fe04a);
+
+// какашка на куче + мухи над ней; дальше куча «испорчена»
+function addPoop(pile) {
+  const u = pile.userData;
+  u.fouled = true;
+  const poop = new THREE.Group();
+  poop.position.y = 0.4;
+  poop.add(part(new THREE.IcosahedronGeometry(0.4, 1), POOP_MAT, 0, 0.08, 0, 1, 0.5, 1));
+  poop.add(part(new THREE.IcosahedronGeometry(0.28, 1), POOP_MAT, 0.03, 0.3, 0.02, 1, 0.8, 1));
+  poop.add(part(new THREE.ConeGeometry(0.12, 0.3, 6), POOP_MAT, 0, 0.5, 0));
+  pile.add(poop);
+  const flyGeo = new THREE.SphereGeometry(0.05, 4, 3);
+  u.flies = Array.from({ length: 4 }, () => {
+    const mesh = new THREE.Mesh(flyGeo, FLY_MAT);
+    pile.add(mesh);
+    return { mesh, a: rand(0, 6.28), r: rand(0.5, 0.8), h: rand(0.8, 1.1), s: rand(4, 7) };
+  });
+}
+
+function updateFouled(dt, t) {
+  for (const p of piles) {
+    const u = p.userData;
+    if (!u.fouled || u.dying) continue;
+    for (const f of u.flies) {
+      f.a += dt * f.s;
+      f.mesh.position.set(Math.cos(f.a) * f.r, f.h + Math.sin(t * 9 + f.a) * 0.08, Math.sin(f.a) * f.r);
+    }
+    u.smokeT -= dt;
+    if (u.smokeT <= 0) {       // зелёный дымок поднимается вверх
+      u.smokeT = 0.1;
+      emit(p.position.x + rand(-0.2, 0.2), 0.9, p.position.z + rand(-0.2, 0.2),
+        rand(-0.1, 0.1), rand(0.8, 1.2), rand(-0.1, 0.1), SMOKE_COLOR, rand(1.2, 1.8), -0.4);
+    }
+  }
+}
+
+// ---------- Леви: большой чёрно-подпалый пёс (NPC) ----------
+const LEVI_SCALE = 2, LEVI_SPEED = 2.4, LEVI_CLEAN_MIN = 4, LEVI_SCARE_R = 2.4;
+const LEVI_BLACK = new THREE.MeshStandardMaterial({ color: 0x1d2227, flatShading: true, roughness: 0.85 });
+const LEVI_TAN = new THREE.MeshStandardMaterial({ color: 0xa8692b, flatShading: true, roughness: 0.8 });
+const LEVI_CREAM = new THREE.MeshStandardMaterial({ color: 0xd9c49c, flatShading: true, roughness: 0.8 });
+const LEVI_EYE = new THREE.MeshStandardMaterial({ color: 0x6b3a14, flatShading: true, roughness: 0.4 });
+
+const leviRoot = new THREE.Group();     // корень: позиция на земле, поворот; размер — в 2 раза больше Джема
+leviRoot.scale.setScalar(LEVI_SCALE);
+leviRoot.position.set(-12, 0, 10);
+scene.add(leviRoot);
+const leviBody = new THREE.Group();     // тело: присед, дыхание
+leviRoot.add(leviBody);
+
+const leviTorsoGeo = new THREE.CylinderGeometry(0.36, 0.4, 1.3, 7);
+leviTorsoGeo.rotateX(Math.PI / 2);
+leviBody.add(part(leviTorsoGeo, LEVI_BLACK, 0, 0.95, 0));
+leviBody.add(part(new THREE.IcosahedronGeometry(0.22, 1), LEVI_CREAM, 0, 0.82, 0.46, 1, 1.2, 0.8));   // светлая грудь
+
+const makeLeviLeg = (x, z) => {
+  const g = new THREE.Group();
+  g.position.set(x, 0.7, z);
+  g.add(part(new THREE.BoxGeometry(0.22, 0.7, 0.22), LEVI_BLACK, 0, -0.35, 0));
+  g.add(part(new THREE.BoxGeometry(0.26, 0.1, 0.32), LEVI_BLACK, 0, -0.65, 0.04));
+  leviBody.add(g);
+  return g;
+};
+const legFL = makeLeviLeg(-0.24, 0.42), legFR = makeLeviLeg(0.24, 0.42);
+const legBL = makeLeviLeg(-0.24, -0.42), legBR = makeLeviLeg(0.24, -0.42);
+
+const leviHead = new THREE.Group();
+leviHead.position.set(0, 1.3, 0.75);
+leviBody.add(leviHead);
+leviHead.add(part(new THREE.IcosahedronGeometry(0.36, 1), LEVI_BLACK, 0, 0, 0, 0.9, 0.95, 1.1));
+leviHead.add(part(new THREE.BoxGeometry(0.24, 0.2, 0.4), LEVI_BLACK, 0, -0.12, 0.36));   // морда
+leviHead.add(part(new THREE.IcosahedronGeometry(0.08, 0), matD, 0, 0, 0.6));              // нос
+[-1, 1].forEach((s) => {
+  leviHead.add(part(new THREE.DodecahedronGeometry(0.07, 0), LEVI_TAN, s * 0.17, 0.25, 0.27, 1.2, 0.6, 0.6));  // рыжие пятна над глазами
+  leviHead.add(part(new THREE.IcosahedronGeometry(0.13, 0), LEVI_TAN, s * 0.2, -0.1, 0.22, 1, 0.9, 1.1));      // рыжие щёки
+  leviHead.add(part(new THREE.SphereGeometry(0.06, 6, 5), LEVI_EYE, s * 0.15, 0.1, 0.34));
+  leviHead.add(part(new THREE.SphereGeometry(0.03, 5, 4), matD, s * 0.15, 0.1, 0.39));
+  const ear = new THREE.Group();          // висячее ухо
+  ear.position.set(s * 0.3, 0.12, -0.04);
+  ear.rotation.z = s * 0.35;
+  ear.add(part(new THREE.BoxGeometry(0.1, 0.34, 0.2), LEVI_BLACK, 0, -0.17, 0));
+  leviHead.add(ear);
+});
+
+const leviTailWag = new THREE.Group();  // хвост виляет
+leviTailWag.position.set(0, 1.05, -0.6);
+leviBody.add(leviTailWag);
+const leviTail = new THREE.Group();     // висит вниз и назад
+leviTail.rotation.x = -2.5;
+leviTailWag.add(leviTail);
+leviTail.add(part(new THREE.CylinderGeometry(0.06, 0.09, 0.8, 5), LEVI_BLACK, 0, 0.4, 0));
+
+// состояния: idle (стоит) → walk (идёт) → poop (какает на кучу) → idle
+const leviAI = { state: 'idle', t: 2, el: 0, pooped: false, tx: 0, tz: 0, pile: null, poopCool: rand(12, 20), speed: 0, gait: 0 };
+
+function turnTo(obj, want, dt, rate) {
+  let diff = want - obj.rotation.y;
+  diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+  obj.rotation.y += diff * Math.min(1, dt * rate);
+}
+
+// чистые кучи (без какашки и не та, что сейчас описывает Джем)
+function cleanPileCount() {
+  return piles.filter((p) => !p.userData.dying && !p.userData.fouled && p !== (peeing && peeing.pile)).length;
+}
+
+function pickPoopPile() {
+  const ok = piles.filter((p) => {
+    const u = p.userData;
+    return !u.dying && !u.fouled && !u.target && u.spawnT >= 0.6;
+  });
+  return ok.length ? pick(ok) : null;
+}
+
+function leviGoIdle() {
+  const L = leviAI;
+  if (L.pile) L.pile.userData.target = false;
+  L.pile = null;
+  L.state = 'idle';
+  L.t = rand(1.5, 4);
+}
+
+function updateLevi(dt, t) {
+  const L = leviAI, p = leviRoot.position;
+  L.poopCool -= dt;
+
+  if (L.state === 'idle') {
+    L.t -= dt;
+    if (L.t <= 0) {
+      // Леви не какает, если после этого осталось бы меньше LEVI_CLEAN_MIN чистых куч
+      const pile = L.poopCool <= 0 && cleanPileCount() > LEVI_CLEAN_MIN ? pickPoopPile() : null;
+      if (pile) pile.userData.target = true;
+      L.pile = pile;
+      L.tx = pile ? pile.position.x : rand(-BOUND + 3, BOUND - 3);
+      L.tz = pile ? pile.position.z : rand(-BOUND + 3, BOUND - 3);
+      L.state = 'walk';
+    }
+  } else if (L.state === 'walk') {
+    if (L.pile && (L.pile.userData.dying || L.pile.userData.fouled)) {
+      leviGoIdle();
+    } else {
+      const dx = L.tx - p.x, dz = L.tz - p.z, d = Math.hypot(dx, dz);
+      if (d < (L.pile ? 2.4 : 0.5)) {
+        if (L.pile) { L.state = 'poop'; L.el = 0; L.pooped = false; }
+        else leviGoIdle();
+      } else {
+        turnTo(leviRoot, Math.atan2(dx, dz), dt, 3);
+        L.speed = lerp(L.speed, LEVI_SPEED, 1 - Math.exp(-3 * dt));
+        p.x = clamp(p.x + dx / d * L.speed * dt, -BOUND + 2, BOUND - 2);
+        p.z = clamp(p.z + dz / d * L.speed * dt, -BOUND + 2, BOUND - 2);
+      }
+    }
+  } else if (L.state === 'poop') {
+    const pile = L.pile, u = pile.userData;
+    const dx = p.x - pile.position.x, dz = p.z - pile.position.z, d = Math.hypot(dx, dz) || 1;
+    turnTo(leviRoot, Math.atan2(dx, dz), dt, 4);   // встаёт задом к куче
+    p.x = lerp(p.x, pile.position.x + dx / d * 1.1, 1 - Math.exp(-6 * dt));
+    p.z = lerp(p.z, pile.position.z + dz / d * 1.1, 1 - Math.exp(-6 * dt));
+    L.el += dt;
+    if (!L.pooped && L.el >= 1.1) {
+      L.pooped = true;
+      if (!u.dying && cleanPileCount() > LEVI_CLEAN_MIN) {
+        addPoop(pile);
+        L.poopCool = rand(12, 20);
+      } else {
+        L.poopCool = rand(5, 8);
+      }
+    }
+    if (L.el >= 2) leviGoIdle();
+  }
+  if (L.state !== 'walk') L.speed = lerp(L.speed, 0, 1 - Math.exp(-5 * dt));
+
+  // анимация
+  const sq = L.state === 'poop' ? smooth(0, 0.35, L.el) * (1 - smooth(1.6, 2, L.el)) : 0;   // присед
+  const k = clamp(L.speed / LEVI_SPEED, 0, 1);
+  L.gait += dt * (2 + L.speed * 1.2);
+  const sw = Math.sin(L.gait) * 0.5 * k;
+  legFL.rotation.x = sw;
+  legFR.rotation.x = -sw;
+  legBL.rotation.x = -sw + 0.5 * sq;
+  legBR.rotation.x = sw + 0.5 * sq;
+  leviBody.position.y = -0.15 * sq + Math.abs(Math.sin(L.gait)) * 0.05 * k;
+  leviBody.position.x = Math.sin(t * 45) * 0.012 * sq;   // тужится
+  leviTail.rotation.x = -2.5 + 1.5 * sq;                 // хвост поднимается
+  leviTailWag.rotation.y = Math.sin(t * (k > 0.1 ? 7 : 2.5)) * 0.3;
 }
 
 // ---------- Старт ----------
